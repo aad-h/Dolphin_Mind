@@ -53,3 +53,22 @@ resume bullet can carry real numbers:
 - **SWE:** tool runtime design, async multi-agent orchestration, streaming API, deployment
 - **Product:** UX of trust (citations, "I don't know", live steps), cost/latency trade-offs
 - **DS:** metric design, ablations, confidence intervals, failure taxonomy
+
+---
+
+## Scheduled backlog (worked top to bottom, 1–2 commits per session)
+
+Each item must ship with GPU-free tests (use `ScriptedLLM` / mocked HTTP; no
+API keys or downloads in tests), keep `pytest` green, and update the README if
+user-visible. Tick the box in the same commit that finishes it.
+
+- [ ] 1. `OpenAICompatLLM` backend (`dolphinmind/agent/llm.py`): any OpenAI-compatible endpoint via `httpx`, key from `DOLPHIN_API_KEY` env var, retries + timeout, token usage tracking; tests with a mocked transport
+- [ ] 2. CLI: `python -m dolphinmind.agent "question" --doc book.txt [--backend scripted|openai|hf] [--trace]` printing the answer, citations and the step trace
+- [ ] 3. Eval dataset format + generator: JSONL schema (question, answer, type, evidence chunk text) and a synthetic generator for single-hop, multi-hop, numeric and unanswerable questions over long text
+- [ ] 4. Metrics (`dolphinmind/eval/metrics.py`): exact/fuzzy accuracy, citation faithfulness (answer evidence present in cited chunks), tool calls, tokens, latency; bootstrap 95% CIs
+- [ ] 5. `run_agent_eval.py`: compare truncation, plain RAG, DolphinMind retrieval and the ReAct agent on a dataset; CSV + markdown summary table
+- [ ] 6. Multi-agent: planner (decompose) → workers (research sub-questions) → verifier (check each claim against its cited chunk, retry or answer "not found")
+- [ ] 7. Run workers in parallel with `asyncio` + per-query token/cost budget enforcement
+- [ ] 8. FastAPI service: `POST /ask` and `GET /ask/stream` (SSE streaming each agent step), document upload, in-memory doc cache
+- [ ] 9. Single-page web UI (static HTML/JS served by FastAPI): upload doc, ask, watch tool calls stream live, click citations to highlight chunks
+- [ ] 10. Tracing (OpenTelemetry spans per LLM/tool call), response caching, Dockerfile, architecture diagram in README
