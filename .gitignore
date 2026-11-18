@@ -36,5 +36,8 @@ logs/
 Thumbs.db
 
 # Don't ignore .gitkeep files
-!.gitkeep.pytest_cache/
+!.gitkeep
+
+# Tests & outputs
+.pytest_cache/
 results/
