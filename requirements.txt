@@ -10,6 +10,9 @@ bitsandbytes>=0.41.0
 sentence-transformers>=2.2.0
 faiss-cpu>=1.7.4
 
+# agent API backend (OpenAI-compatible endpoints)
+httpx>=0.25.0
+
 # evaluation & analysis
 numpy>=1.24.0
 pandas>=2.0.0

@@ -60,6 +60,28 @@ answer, n_tokens = generate(model, tok, f"Context:\n{context}\n\nQuestion: Who k
 print(answer)
 ```
 
+### Agent with an API model (no GPU)
+
+`OpenAICompatLLM` drives the DolphinAgent ReAct loop with any OpenAI-compatible
+`/chat/completions` endpoint (OpenAI, OpenRouter, Groq, vLLM, Ollama, llama.cpp...).
+The key is read only from the environment:
+
+```bash
+export DOLPHIN_API_KEY=...                         # optional for local servers
+export DOLPHIN_BASE_URL=https://api.openai.com/v1  # default
+```
+
+```python
+from dolphinmind.agent import Document, OpenAICompatLLM, ReActAgent, Toolbox
+
+llm = OpenAICompatLLM(model="gpt-4o-mini")
+result = ReActAgent(llm, Toolbox(Document(open("book.txt").read()))).run("Who killed the count?")
+print(result.answer, result.citations, llm.usage.total_tokens)
+```
+
+Transient errors (timeouts, 429, 5xx) are retried with exponential backoff and
+`Retry-After`; token usage accumulates in `llm.usage`.
+
 ## Project structure
 
 ```
@@ -67,6 +89,7 @@ dolphinmind/
   retrieval.py     # sentence-aware chunking + FAISS SemanticRetriever
   models.py        # Qwen2.5-3B / SmolLM3-3B (YaRN) loading and generation
   evaluation.py    # needles, haystack builder, scoring, Cohen's d
+  agent/           # DolphinAgent: LLM backends, tools, ReAct loop with citations
 run_benchmark.py   # reproduces the results table
 tests/             # GPU-free unit tests (pytest)
 notebooks/

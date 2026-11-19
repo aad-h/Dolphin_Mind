@@ -18,7 +18,7 @@ resume bullet can carry real numbers:
 - [x] ReAct loop with JSON tool calls, step budget, error recovery and full trace
 - [x] Citations: every answer references chunk ids it actually read
 - [x] Unit tests with a scripted fake LLM (no GPU)
-- [ ] API-model backend (OpenAI-compatible) so the agent runs fast while developing
+- [x] API-model backend (OpenAI-compatible) so the agent runs fast while developing
 - [ ] `python -m dolphinmind.agent "question" --doc file.txt` CLI
 
 ## Phase 2: Evaluation harness (week 2): the part that stands out
@@ -62,7 +62,7 @@ Each item must ship with GPU-free tests (use `ScriptedLLM` / mocked HTTP; no
 API keys or downloads in tests), keep `pytest` green, and update the README if
 user-visible. Tick the box in the same commit that finishes it.
 
-- [ ] 1. `OpenAICompatLLM` backend (`dolphinmind/agent/llm.py`): any OpenAI-compatible endpoint via `httpx`, key from `DOLPHIN_API_KEY` env var, retries + timeout, token usage tracking; tests with a mocked transport
+- [x] 1. `OpenAICompatLLM` backend (`dolphinmind/agent/llm.py`): any OpenAI-compatible endpoint via `httpx`, key from `DOLPHIN_API_KEY` env var, retries + timeout, token usage tracking; tests with a mocked transport
 - [ ] 2. CLI: `python -m dolphinmind.agent "question" --doc book.txt [--backend scripted|openai|hf] [--trace]` printing the answer, citations and the step trace
 - [ ] 3. Eval dataset format + generator: JSONL schema (question, answer, type, evidence chunk text) and a synthetic generator for single-hop, multi-hop, numeric and unanswerable questions over long text
 - [ ] 4. Metrics (`dolphinmind/eval/metrics.py`): exact/fuzzy accuracy, citation faithfulness (answer evidence present in cited chunks), tool calls, tokens, latency; bootstrap 95% CIs
