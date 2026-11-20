@@ -82,6 +82,26 @@ print(result.answer, result.citations, llm.usage.total_tokens)
 Transient errors (timeouts, 429, 5xx) are retried with exponential backoff and
 `Retry-After`; token usage accumulates in `llm.usage`.
 
+### Command line
+
+```bash
+python -m dolphinmind.agent "Who killed the count?" --doc book.txt --trace
+```
+
+Prints the answer, each cited chunk and (with `--trace`) every thought, tool call
+and observation, plus token usage for API backends.
+
+| Flag | Meaning |
+|------|---------|
+| `--backend openai\|hf\|scripted` | API endpoint (default, key from `DOLPHIN_API_KEY`), local 4-bit Qwen (GPU), or canned replies |
+| `--model`, `--base-url` | model name / OpenAI-compatible endpoint |
+| `--script replies.json` | scripted backend: JSON list of model replies, for offline demos |
+| `--semantic` | enable the `search_doc` tool (loads `all-MiniLM-L6-v2`); otherwise `grep` + `read_section` |
+| `--max-steps`, `--chunk-size`, `--overlap` | tool budget and chunking |
+| `--json` | machine-readable result (answer, citations with text, steps, usage) |
+
+`--doc -` reads the document from stdin. Exit codes: 0 ok, 1 backend error, 2 bad usage.
+
 ## Project structure
 
 ```
@@ -89,7 +109,7 @@ dolphinmind/
   retrieval.py     # sentence-aware chunking + FAISS SemanticRetriever
   models.py        # Qwen2.5-3B / SmolLM3-3B (YaRN) loading and generation
   evaluation.py    # needles, haystack builder, scoring, Cohen's d
-  agent/           # DolphinAgent: LLM backends, tools, ReAct loop with citations
+  agent/           # DolphinAgent: LLM backends, tools, ReAct loop with citations, CLI
 run_benchmark.py   # reproduces the results table
 tests/             # GPU-free unit tests (pytest)
 notebooks/
