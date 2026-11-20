@@ -39,7 +39,7 @@ class Tool:
 class Toolbox:
     """Builds the standard tool set over a document and tracks chunks the agent has seen."""
 
-    def __init__(self, doc: Document, retriever: Optional[SemanticRetriever] = None, max_chars: int = 1200):
+    def __init__(self, doc: Document, retriever: Optional[SemanticRetriever] = None, max_chars: int = 3000):
         self.doc = doc
         self.retriever = retriever
         self.max_chars = max_chars
@@ -50,9 +50,9 @@ class Toolbox:
 
     # -- helpers -------------------------------------------------------------
     def _show(self, ids: List[int]) -> str:
+        """Render chunks for the model, truncating each one separately so every shown chunk is visible."""
         self.seen.update(ids)
-        out = "\n\n".join(f"[chunk {i}] {self.doc.chunks[i]}" for i in ids)
-        return out[: self.max_chars * max(1, len(ids))]
+        return "\n\n".join(f"[chunk {i}] {self.doc.chunks[i][: self.max_chars]}" for i in ids)
 
     # -- tools ---------------------------------------------------------------
     def search_doc(self, query: str, k: int = 3) -> str:

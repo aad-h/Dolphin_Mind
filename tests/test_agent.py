@@ -67,3 +67,18 @@ def test_tools_validate_inputs():
     assert tb.call("calculator", {"expression": "(47*2)+3.5"}) == "97.5"
     assert "error" in tb.call("calculator", {"expression": "__import__('os').system('ls')"})
     assert "error" in tb.call("calculator", {"expression": "9**9999"})
+
+
+def test_multi_chunk_results_truncate_per_chunk():
+    doc = Document(" ".join(f"Sentence number {i} is here." for i in range(400)), chunk_size=60, overlap=10)
+    tb = Toolbox(doc, max_chars=50)
+    out = tb.call("grep", {"pattern": "sentence", "k": 3})
+    # every returned chunk is visible, not just the first ones
+    assert all(f"[chunk {i}]" in out for i in range(3))
+    assert all(len(block) <= len("[chunk 0] ") + 50 for block in out.split("\n\n"))
+
+
+def test_default_toolbox_shows_whole_default_chunks():
+    doc = Document(make_haystack(5_000))
+    tb = Toolbox(doc)
+    assert all(tb.read_section(i) == f"[chunk {i}] {c}" for i, c in enumerate(doc.chunks))
