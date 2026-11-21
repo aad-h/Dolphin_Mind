@@ -102,6 +102,35 @@ and observation, plus token usage for API backends.
 
 `--doc -` reads the document from stdin. Exit codes: 0 ok, 1 backend error, 2 bad usage.
 
+### Evaluation datasets
+
+`dolphinmind.eval` defines the benchmark format (one JSON object per line) and a
+synthetic generator that plants invented facts into any long text at random
+sentence boundaries, so answers can only come from the document:
+
+```json
+{"id": "moby-0001", "question": "In which town was the chief archivist of Thisgate born?",
+ "answer": "Tuholm", "type": "multi_hop",
+ "evidence": ["The chief archivist of Thisgate is Daendis Draemmork.", "Daendis Draemmork was born in Tuholm."],
+ "doc_id": "moby", "metadata": {"bridge": "Daendis Draemmork", "depths": [0.2273, 0.048]}}
+```
+
+| Type | What it tests |
+|------|---------------|
+| `single_hop` | one planted sentence answers the question |
+| `multi_hop` | two sentences linked by a bridge entity, planted independently |
+| `numeric` | sum or difference of two planted quantities |
+| `unanswerable` | the entity is mentioned but the fact never is; gold answer `"not found"` |
+
+```bash
+python -m dolphinmind.eval moby.txt pride.txt --out data/ -n 100   # data/moby.txt + data/moby.jsonl, ...
+python -m dolphinmind.eval --haystack 20000 --out data/ --types single_hop,numeric --seed 1
+```
+
+Question types are balanced round-robin, generation is deterministic per `--seed`,
+and every evidence string is checked to appear verbatim in the written document.
+Load a dataset with `dolphinmind.eval.load_jsonl` (validates every line).
+
 ## Project structure
 
 ```
@@ -110,6 +139,7 @@ dolphinmind/
   models.py        # Qwen2.5-3B / SmolLM3-3B (YaRN) loading and generation
   evaluation.py    # needles, haystack builder, scoring, Cohen's d
   agent/           # DolphinAgent: LLM backends, tools, ReAct loop with citations, CLI
+  eval/            # benchmark JSONL schema + synthetic question generator
 run_benchmark.py   # reproduces the results table
 tests/             # GPU-free unit tests (pytest)
 notebooks/
