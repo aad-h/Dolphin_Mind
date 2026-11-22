@@ -131,6 +131,31 @@ Question types are balanced round-robin, generation is deterministic per `--seed
 and every evidence string is checked to appear verbatim in the written document.
 Load a dataset with `dolphinmind.eval.load_jsonl` (validates every line).
 
+### Metrics
+
+`dolphinmind.eval.metrics` scores each (system, question) pair and aggregates
+with percentile-bootstrap 95% confidence intervals:
+
+| Metric | Definition |
+|--------|------------|
+| `exact` | normalized match (case, punctuation, articles; `1,200.0` = `1200`) |
+| `fuzzy` | gold appears as a whole-token span, or token F1 ≥ 0.8; numeric answers must state exactly one number, equal to gold |
+| `f1` | SQuAD-style token F1 |
+| `evidence_recall` | citation faithfulness: share of gold evidence found in the chunks the agent cited |
+| `citation_precision` | share of cited chunks that contain any gold evidence |
+| `tool_calls`, `total_tokens`, `latency_s`, `cost_usd` | cost per question |
+
+Unanswerable questions count as correct only when the system abstains
+(`"not found"`, `"the document does not say"`, ...); abstaining on an answerable
+question is always wrong.
+
+```python
+from dolphinmind.eval import format_summary, load_jsonl, score_agent_result, summarize
+
+scores = [score_agent_result(item, agent.run(item.question), doc.chunks) for item in items]
+print(format_summary(summarize(scores)))   # | group | n | exact | fuzzy | ... with [lo, hi] CIs
+```
+
 ## Project structure
 
 ```
@@ -139,7 +164,7 @@ dolphinmind/
   models.py        # Qwen2.5-3B / SmolLM3-3B (YaRN) loading and generation
   evaluation.py    # needles, haystack builder, scoring, Cohen's d
   agent/           # DolphinAgent: LLM backends, tools, ReAct loop with citations, CLI
-  eval/            # benchmark JSONL schema + synthetic question generator
+  eval/            # benchmark JSONL schema, synthetic question generator, metrics + bootstrap CIs
 run_benchmark.py   # reproduces the results table
 tests/             # GPU-free unit tests (pytest)
 notebooks/
