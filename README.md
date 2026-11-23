@@ -156,6 +156,33 @@ scores = [score_agent_result(item, agent.run(item.question), doc.chunks) for ite
 print(format_summary(summarize(scores)))   # | group | n | exact | fuzzy | ... with [lo, hi] CIs
 ```
 
+### Comparing systems
+
+`run_agent_eval.py` runs four systems on a JSONL benchmark with the same chat
+backend and the same context budget, then writes a per-question CSV and a markdown
+summary (mean [95% bootstrap CI] per system, plus accuracy per question type):
+
+| System | What the model sees |
+|--------|---------------------|
+| `truncation` | the first `top_k × chunk_size` words of the document |
+| `rag` | plain RAG: fixed word windows (no overlap, sentence-blind), top-k by similarity, best first |
+| `dolphinmind` | sentence-aware overlapping chunks, top-k, reassembled in document order |
+| `react` | the DolphinAgent tool loop (`search_doc`, `grep`, `read_section`, `calculator`) with citations |
+
+```bash
+python -m dolphinmind.eval --haystack 20000 --out data/ -n 40
+python run_agent_eval.py data/haystack20000.jsonl --model gpt-4o-mini --prices 0.15,0.60
+# -> results/agent_eval.csv (system x question) and results/agent_eval.md (summary table)
+```
+
+Each item's document is read from `<dataset dir>/<doc_id>.txt` (what the generator
+writes) or `--doc book.txt`. Useful flags: `--systems react,dolphinmind`,
+`--types multi_hop`, `--limit 20`, `--top-k`, `--chunk-size`, `--max-steps`,
+`--embedder hashing` (offline bag-of-words instead of MiniLM). For the single-pass
+systems `evidence_recall` is retrieval recall (did the evidence reach the model?).
+Tokens come from the API's reported usage, or are estimated at ~4 chars/token
+(flagged in the summary) for local models; backend errors count as wrong answers.
+
 ## Project structure
 
 ```
@@ -164,8 +191,10 @@ dolphinmind/
   models.py        # Qwen2.5-3B / SmolLM3-3B (YaRN) loading and generation
   evaluation.py    # needles, haystack builder, scoring, Cohen's d
   agent/           # DolphinAgent: LLM backends, tools, ReAct loop with citations, CLI
-  eval/            # benchmark JSONL schema, synthetic question generator, metrics + bootstrap CIs
+  eval/            # benchmark JSONL schema, synthetic question generator, metrics + bootstrap CIs,
+                   # system comparison runner
 run_benchmark.py   # reproduces the results table
+run_agent_eval.py  # truncation vs plain RAG vs DolphinMind vs ReAct agent -> CSV + summary
 tests/             # GPU-free unit tests (pytest)
 notebooks/
   01_load_model_and_profile.ipynb

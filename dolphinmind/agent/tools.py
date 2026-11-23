@@ -44,9 +44,14 @@ class Toolbox:
         self.retriever = retriever
         self.max_chars = max_chars
         self.seen: set[int] = set()
-        if retriever is not None:
+        # reuse an index that already covers these chunks (e.g. shared across eval questions)
+        if retriever is not None and (retriever.index is None or retriever.chunks != doc.chunks):
             retriever.build(doc.chunks)
         self.tools: Dict[str, Tool] = {t.name: t for t in self._build()}
+
+    def reset(self) -> None:
+        """Forget which chunks were shown, so the toolbox can serve a new question."""
+        self.seen.clear()
 
     # -- helpers -------------------------------------------------------------
     def _show(self, ids: List[int]) -> str:
@@ -58,8 +63,7 @@ class Toolbox:
     def search_doc(self, query: str, k: int = 3) -> str:
         if self.retriever is None:
             return "error: semantic search unavailable; use grep"
-        hits = self.retriever.retrieve(query, top_k=int(k))
-        ids = [self.doc.chunks.index(h) for h in hits]
+        ids = sorted(i for i, _ in self.retriever.search(query, top_k=int(k)))
         return self._show(ids) or "no results"
 
     def grep(self, pattern: str, k: int = 3) -> str:

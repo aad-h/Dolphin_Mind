@@ -26,8 +26,8 @@ resume bullet can carry real numbers:
       single-hop, multi-hop, numeric/aggregation, unanswerable
 - [ ] Metrics: accuracy, citation faithfulness (is the claim in the cited chunk?),
       tokens & $ per question, latency, tool calls per question
-- [ ] Baselines: truncation, plain RAG, DolphinMind retrieval, single ReAct agent
-- [ ] `run_agent_eval.py` → CSV + summary table with bootstrap confidence intervals
+- [x] Baselines: truncation, plain RAG, DolphinMind retrieval, single ReAct agent
+- [x] `run_agent_eval.py` → CSV + summary table with bootstrap confidence intervals
 
 ## Phase 3: Multi-agent (week 3)
 - [ ] Planner: decomposes question into sub-questions
@@ -66,7 +66,7 @@ user-visible. Tick the box in the same commit that finishes it.
 - [x] 2. CLI: `python -m dolphinmind.agent "question" --doc book.txt [--backend scripted|openai|hf] [--trace]` printing the answer, citations and the step trace
 - [x] 3. Eval dataset format + generator: JSONL schema (question, answer, type, evidence chunk text) and a synthetic generator for single-hop, multi-hop, numeric and unanswerable questions over long text
 - [x] 4. Metrics (`dolphinmind/eval/metrics.py`): exact/fuzzy accuracy, citation faithfulness (answer evidence present in cited chunks), tool calls, tokens, latency; bootstrap 95% CIs
-- [ ] 5. `run_agent_eval.py`: compare truncation, plain RAG, DolphinMind retrieval and the ReAct agent on a dataset; CSV + markdown summary table
+- [x] 5. `run_agent_eval.py`: compare truncation, plain RAG, DolphinMind retrieval and the ReAct agent on a dataset; CSV + markdown summary table
 - [ ] 6. Multi-agent: planner (decompose) → workers (research sub-questions) → verifier (check each claim against its cited chunk, retry or answer "not found")
 - [ ] 7. Run workers in parallel with `asyncio` + per-query token/cost budget enforcement
 - [ ] 8. FastAPI service: `POST /ask` and `GET /ask/stream` (SSE streaming each agent step), document upload, in-memory doc cache
