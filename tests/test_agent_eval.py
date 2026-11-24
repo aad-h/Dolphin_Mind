@@ -15,6 +15,7 @@ import pytest
 pytest.importorskip("faiss")
 
 from dolphinmind.agent import LLMError, OpenAICompatLLM, ScriptedLLM  # noqa: E402
+from dolphinmind.agent.multi import PLANNER_PROMPT, VERIFIER_PROMPT  # noqa: E402
 from dolphinmind.agent.tools import Document, Toolbox  # noqa: E402
 from dolphinmind.eval import EvalConfig, EvalItem, generate, run_eval, save_jsonl, write_csv  # noqa: E402
 from dolphinmind.eval.runner import (ANSWER_SYSTEM, CSV_FIELDS, MeteredLLM, estimate_tokens,  # noqa: E402
@@ -178,6 +179,37 @@ def test_run_eval_validation(bench):
     # react without an embedder falls back to grep-only tools
     run = run_eval(bench.items[:2], {"hay": bench.text}, llm, ["react"], CFG)
     assert len(run.rows) == 2
+
+
+class MultiReaderLLM(ReaderLLM):
+    """ReaderLLM plus the multi-agent roles: a one-step planner and an honest verifier."""
+
+    def chat(self, messages):
+        system = messages[0]["content"]
+        if system == PLANNER_PROMPT.format(max_sub=4):
+            self.calls += 1
+            return json.dumps({"sub_questions": [messages[1]["content"].removeprefix("Question: ")]})
+        if system == VERIFIER_PROMPT:
+            self.calls += 1
+            question = re.search(r"Question: (.*?)\n", messages[1]["content"]).group(1)
+            excerpts = _squash(messages[1]["content"])
+            ok = all(_squash(e) in excerpts for e in self.by_q[question].evidence)
+            return json.dumps({"supported": ok, "reason": "evidence present" if ok else "missing"})
+        return super().chat(messages)
+
+
+def test_run_eval_multi_agent_system(bench):
+    run = run_eval(bench.items, {"hay": bench.text}, MultiReaderLLM(bench.items), ["react", "multi"], CFG,
+                   embedder=HashingEmbedder())
+    assert run.systems == ["react", "multi"]
+    multi = run.scores("multi")
+    assert len(multi) == len(bench.items) and all(s.fuzzy for s in multi)
+    assert all(s.evidence_recall == 1.0 for s in multi if s.type != "unanswerable")
+    # planner + verifier calls cost tokens on top of the worker's
+    react = {s.id: s for s in run.scores("react")}
+    answerable = [s for s in multi if s.type != "unanswerable"]
+    assert all(s.prompt_tokens > react[s.id].prompt_tokens for s in answerable)
+    assert format_comparison(run, n_boot=50).count("| multi |") >= 1
 
 
 class _Flaky:

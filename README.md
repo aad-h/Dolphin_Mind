@@ -82,6 +82,34 @@ print(result.answer, result.citations, llm.usage.total_tokens)
 Transient errors (timeouts, 429, 5xx) are retried with exponential backoff and
 `Retry-After`; token usage accumulates in `llm.usage`.
 
+### Multi-agent: planner → workers → verifier
+
+`MultiAgent` splits a question into ordered sub-questions, researches each with a
+ReAct worker (later workers see earlier verified findings, so multi-hop chains can
+follow a bridge entity), checks every finding against the chunks it cites, and
+combines the verified findings into a final answer:
+
+```python
+from dolphinmind.agent import Document, MultiAgent, OpenAICompatLLM, Toolbox
+
+agent = MultiAgent(OpenAICompatLLM(model="gpt-4o-mini"), Toolbox(Document(open("book.txt").read())))
+res = agent.run("In which town was the chief archivist of Thisgate born?")
+print(res.plan)                       # ['Who is the chief archivist of Thisgate?', 'Where was that person born?']
+for f in res.findings:                # answer, citations, verified / flagged, attempts
+    print(f.question, "->", f.answer, f.citations, "verified" if f.verified else "FLAGGED")
+print(res.answer, res.citations)
+```
+
+| Stage | Behaviour |
+|-------|-----------|
+| planner | ≤ `max_sub_questions` (default 4) ordered sub-questions; a bad plan falls back to the question itself |
+| workers | one `ReActAgent` per sub-question over a shared toolbox, `max_steps` tool calls each |
+| verifier | `LLMVerifier` (default) asks the model whether the cited chunks state the answer; `LexicalVerifier` is a model-free token check. Uncited answers fail without a model call; an unsupported finding is retried `max_retries` times (default 1) with the verifier's reason, then replaced by `"not found"` and flagged |
+| synthesis | combines findings (and does any arithmetic); may only cite chunks behind verified findings. Skipped for a single sub-question |
+
+Workers currently run one after another. `run_agent_eval.py --systems react,multi`
+compares it with the single agent.
+
 ### Command line
 
 ```bash
@@ -158,7 +186,7 @@ print(format_summary(summarize(scores)))   # | group | n | exact | fuzzy | ... w
 
 ### Comparing systems
 
-`run_agent_eval.py` runs four systems on a JSONL benchmark with the same chat
+`run_agent_eval.py` runs four systems (plus the opt-in `multi`) on a JSONL benchmark with the same chat
 backend and the same context budget, then writes a per-question CSV and a markdown
 summary (mean [95% bootstrap CI] per system, plus accuracy per question type):
 
@@ -168,6 +196,7 @@ summary (mean [95% bootstrap CI] per system, plus accuracy per question type):
 | `rag` | plain RAG: fixed word windows (no overlap, sentence-blind), top-k by similarity, best first |
 | `dolphinmind` | sentence-aware overlapping chunks, top-k, reassembled in document order |
 | `react` | the DolphinAgent tool loop (`search_doc`, `grep`, `read_section`, `calculator`) with citations |
+| `multi` | opt-in: planner → ReAct workers → verifier → synthesis (`MultiAgent`); several LLM calls per question |
 
 ```bash
 python -m dolphinmind.eval --haystack 20000 --out data/ -n 40
@@ -190,7 +219,8 @@ dolphinmind/
   retrieval.py     # sentence-aware chunking + FAISS SemanticRetriever
   models.py        # Qwen2.5-3B / SmolLM3-3B (YaRN) loading and generation
   evaluation.py    # needles, haystack builder, scoring, Cohen's d
-  agent/           # DolphinAgent: LLM backends, tools, ReAct loop with citations, CLI
+  agent/           # DolphinAgent: LLM backends, tools, ReAct loop with citations,
+                   # planner/worker/verifier multi-agent, CLI
   eval/            # benchmark JSONL schema, synthetic question generator, metrics + bootstrap CIs,
                    # system comparison runner
 run_benchmark.py   # reproduces the results table

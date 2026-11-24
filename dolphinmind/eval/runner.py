@@ -8,10 +8,12 @@ Systems (all share one chat backend and the same context budget):
 * ``dolphinmind``  sentence-aware overlapping chunks, top-k, reassembled in document order
 * ``react``        :class:`~dolphinmind.agent.ReActAgent` with ``search_doc`` / ``grep`` /
                    ``read_section`` / ``calculator``, citing the chunks it read
+* ``multi``        :class:`~dolphinmind.agent.MultiAgent`: planner -> ReAct workers ->
+                   verifier -> synthesis (opt-in via ``--systems``; several calls per question)
 
 Single-pass systems "cite" the context they were given, so for them
 ``evidence_recall`` measures retrieval recall (did the evidence reach the model?);
-for ``react`` it is citation faithfulness. ``context_words`` defaults to
+for the agents it is citation faithfulness. ``context_words`` defaults to
 ``top_k * chunk_size`` so truncation gets the same word budget as retrieval.
 
 Token counts come from the backend's own usage counter when it has one
@@ -31,13 +33,16 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, TextIO, Tuple
 
 from ..agent.llm import LLM, LLMError, Message, Usage
+from ..agent.multi import MultiAgent
 from ..agent.react import ReActAgent
 from ..agent.tools import Document, Toolbox
 from ..retrieval import HashingEmbedder, SemanticRetriever, fixed_chunks
 from .dataset import QUESTION_TYPES, UNANSWERABLE, EvalItem, check_evidence, load_jsonl
 from .metrics import QuestionScore, score_question, summarize
 
-SYSTEMS = ("truncation", "rag", "dolphinmind", "react")
+SYSTEMS = ("truncation", "rag", "dolphinmind", "react", "multi")
+DEFAULT_SYSTEMS = SYSTEMS[:4]  # "multi" costs several LLM calls per question: opt in
+_AGENTS = frozenset({"react", "multi"})
 _NEEDS_EMBEDDER = frozenset({"rag", "dolphinmind"})
 ERROR_ANSWER = "[error]"
 
@@ -194,8 +199,14 @@ def _react(llm: LLM, idx: DocIndex, question: str) -> Prediction:
     return Prediction(res.answer, list(res.citations), cited, res.tool_calls)
 
 
+def _multi(llm: LLM, idx: DocIndex, question: str) -> Prediction:
+    res = MultiAgent(llm, idx.toolbox(), max_steps=idx.cfg.max_steps).run(question)
+    cited = [idx.doc.chunks[i] for i in res.citations if 0 <= i < len(idx.doc.chunks)]
+    return Prediction(res.answer, list(res.citations), cited, res.tool_calls)
+
+
 _RUNNERS: Dict[str, Callable[[LLM, DocIndex, str], Prediction]] = {
-    "truncation": _truncation, "rag": _rag, "dolphinmind": _dolphinmind, "react": _react,
+    "truncation": _truncation, "rag": _rag, "dolphinmind": _dolphinmind, "react": _react, "multi": _multi,
 }
 
 
@@ -234,7 +245,7 @@ def run_eval(
     items: Sequence[EvalItem],
     docs: Dict[str, str],
     llm: LLM,
-    systems: Sequence[str] = SYSTEMS,
+    systems: Sequence[str] = DEFAULT_SYSTEMS,
     cfg: Optional[EvalConfig] = None,
     embedder: Any = None,
     progress: Optional[Callable[[int, int, EvalRow], None]] = None,
@@ -342,12 +353,14 @@ def format_comparison(run: EvalRun, *, n_boot: int = 2000, seed: Optional[int] =
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="run_agent_eval.py",
-        description="Compare truncation, plain RAG, DolphinMind retrieval and the ReAct agent on a JSONL "
+        description="Compare truncation, plain RAG, DolphinMind retrieval, the ReAct agent and (opt-in) the "
+                    "multi-agent on a JSONL "
                     "benchmark. Writes a per-question CSV and a markdown summary with bootstrap CIs.",
     )
     p.add_argument("datasets", nargs="+", help="JSONL datasets; each item's document is <dir>/<doc_id>.txt")
     p.add_argument("--doc", help="use this text file for every item instead of <dir>/<doc_id>.txt")
-    p.add_argument("--systems", default=",".join(SYSTEMS), help=f"comma-separated (default: {','.join(SYSTEMS)})")
+    p.add_argument("--systems", default=",".join(DEFAULT_SYSTEMS),
+                   help=f"comma-separated subset of {','.join(SYSTEMS)} (default: {','.join(DEFAULT_SYSTEMS)})")
     p.add_argument("--backend", choices=("openai", "hf"), default="openai",
                    help="openai: any OpenAI-compatible endpoint, key from DOLPHIN_API_KEY; hf: local 4-bit Qwen")
     p.add_argument("--model", help="model name (openai: DOLPHIN_MODEL or gpt-4o-mini)")
@@ -453,7 +466,7 @@ def main(argv: Optional[List[str]] = None, *, llm: Optional[LLM] = None, embedde
     owns_llm = llm is None
     try:
         llm = llm or _build_llm(args)
-        if embedder is None and (_NEEDS_EMBEDDER.intersection(systems) or "react" in systems):
+        if embedder is None and (_NEEDS_EMBEDDER.intersection(systems) or _AGENTS.intersection(systems)):
             embedder = _build_embedder(args.embedder)
     except (OSError, ValueError, ImportError) as e:
         print(f"error: {e}", file=stderr)

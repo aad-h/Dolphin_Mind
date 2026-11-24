@@ -5,7 +5,7 @@ from .generator import SyntheticBenchmark, generate, plant_sentences
 from .metrics import (METRICS, Estimate, QuestionScore, bootstrap_ci, citation_precision, evidence_recall,
                       exact_match, format_summary, fuzzy_match, is_abstention, normalize_answer, score_agent_result,
                       score_question, summarize, token_f1)
-from .runner import SYSTEMS, EvalConfig, EvalRun, format_comparison, run_eval, write_csv
+from .runner import DEFAULT_SYSTEMS, SYSTEMS, EvalConfig, EvalRun, format_comparison, run_eval, write_csv
 
 __all__ = [
     "QUESTION_TYPES",
@@ -32,6 +32,7 @@ __all__ = [
     "score_question",
     "summarize",
     "token_f1",
+    "DEFAULT_SYSTEMS",
     "SYSTEMS",
     "EvalConfig",
     "EvalRun",
