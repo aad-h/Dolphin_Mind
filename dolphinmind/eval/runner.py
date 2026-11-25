@@ -27,12 +27,14 @@ from __future__ import annotations
 import argparse
 import csv
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, TextIO, Tuple
 
-from ..agent.llm import LLM, LLMError, Message, Usage
+from ..agent.budget import estimate_tokens, metered_chat, reports_usage  # noqa: F401 - estimate_tokens re-exported
+from ..agent.llm import LLM, LLMError, Message
 from ..agent.multi import MultiAgent
 from ..agent.react import ReActAgent
 from ..agent.tools import Document, Toolbox
@@ -80,36 +82,30 @@ class EvalConfig:
 
 # -- token metering ------------------------------------------------------------------
 
-def estimate_tokens(text: str) -> int:
-    """Rough token count (~4 characters per token) for backends that report no usage."""
-    return (len(text) + 3) // 4
-
-
 class MeteredLLM:
     """Wrap an :class:`~dolphinmind.agent.llm.LLM` and count calls and tokens.
 
-    Uses the backend's ``usage`` counter when it has one, otherwise estimates tokens
-    from message lengths (``estimated`` is then ``True``).
+    Uses the backend's per-call usage (``chat_with_usage``) when it has one, otherwise
+    estimates tokens from message lengths (``estimated`` is then ``True``). Counting is
+    thread-safe, so the parallel workers of a multi-agent run are metered exactly.
     """
 
     def __init__(self, llm: LLM):
         self.llm = llm
-        self.estimated = not isinstance(getattr(llm, "usage", None), Usage)
+        self.estimated = not reports_usage(llm)
         self.calls = self.prompt_tokens = self.completion_tokens = 0
+        self._lock = threading.Lock()
+
+    def chat_with_usage(self, messages: List[Message]) -> Tuple[str, Optional[Tuple[int, int]]]:
+        reply, (p, c), estimated = metered_chat(self.llm, messages)
+        with self._lock:
+            self.prompt_tokens += p
+            self.completion_tokens += c
+            self.calls += 1
+        return reply, None if estimated else (p, c)
 
     def chat(self, messages: List[Message]) -> str:
-        if self.estimated:
-            reply = self.llm.chat(messages)
-            self.prompt_tokens += sum(estimate_tokens(m.get("content", "")) for m in messages)
-            self.completion_tokens += estimate_tokens(reply)
-        else:
-            usage: Usage = self.llm.usage  # type: ignore[attr-defined]
-            before = (usage.prompt_tokens, usage.completion_tokens)
-            reply = self.llm.chat(messages)
-            self.prompt_tokens += usage.prompt_tokens - before[0]
-            self.completion_tokens += usage.completion_tokens - before[1]
-        self.calls += 1
-        return reply
+        return self.chat_with_usage(messages)[0]
 
     def snapshot(self) -> Tuple[int, int]:
         return self.prompt_tokens, self.completion_tokens

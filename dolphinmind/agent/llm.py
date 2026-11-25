@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import os
+import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Protocol
+from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple
 
 Message = Dict[str, str]  # {"role": "system"|"user"|"assistant", "content": str}
 
@@ -76,7 +77,8 @@ class OpenAICompatLLM:
 
     Transient failures (network errors, timeouts, HTTP 429 and 5xx) are retried with
     exponential backoff, honouring ``Retry-After``. Token usage accumulates in ``usage``
-    and the usage of the most recent call is kept in ``last_usage``.
+    and the usage of the most recent call is kept in ``last_usage``; ``chat_with_usage``
+    also returns each call's own usage, which stays exact when threads share the client.
     """
 
     RETRY_STATUS = frozenset({408, 409, 429, 500, 502, 503, 504})
@@ -103,6 +105,7 @@ class OpenAICompatLLM:
         self.max_retries, self.backoff, self._sleep = max_retries, backoff, sleep
         self.usage = Usage()
         self.last_usage: Dict[str, int] = {}
+        self._usage_lock = threading.Lock()
         headers = {"Content-Type": "application/json"}
         if key:
             headers["Authorization"] = f"Bearer {key}"
@@ -129,6 +132,10 @@ class OpenAICompatLLM:
         return self.backoff * (2 ** attempt)
 
     def chat(self, messages: List[Message]) -> str:
+        return self.chat_with_usage(messages)[0]
+
+    def chat_with_usage(self, messages: List[Message]) -> Tuple[str, Tuple[int, int]]:
+        """Reply plus ``(prompt_tokens, completion_tokens)`` reported for this call."""
         import httpx
 
         payload = {
@@ -155,13 +162,15 @@ class OpenAICompatLLM:
                 self._sleep(self._delay(attempt, retry_after))
         raise LLMError(f"giving up after {self.max_retries + 1} attempts: {last_err}")
 
-    def _parse(self, resp: Any) -> str:
+    def _parse(self, resp: Any) -> Tuple[str, Tuple[int, int]]:
         try:
             data = resp.json()
             content = data["choices"][0]["message"]["content"]
         except (ValueError, KeyError, IndexError, TypeError) as e:
             raise LLMError(f"malformed response: {resp.text[:300]}") from e
         usage = data.get("usage") or {}
-        self.usage.add(usage)
-        self.last_usage = {k: int(usage.get(k) or 0) for k in ("prompt_tokens", "completion_tokens", "total_tokens")}
-        return content or ""
+        last = {k: int(usage.get(k) or 0) for k in ("prompt_tokens", "completion_tokens", "total_tokens")}
+        with self._usage_lock:
+            self.usage.add(usage)
+            self.last_usage = last
+        return content or "", (last["prompt_tokens"], last["completion_tokens"])

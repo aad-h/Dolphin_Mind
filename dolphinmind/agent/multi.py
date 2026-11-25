@@ -13,16 +13,30 @@ The :class:`MultiAgent` answers a question in four stages:
 4. **Synthesis** combines the verified findings into the final answer; it may only cite
    chunks that back a verified finding.
 
-Workers run sequentially here; parallel execution is a separate step.
+Workers run concurrently with :mod:`asyncio`. The planner may say which earlier
+sub-questions each one needs (``depends_on``); a sub-question starts as soon as its
+dependencies are verified, so independent lookups run side by side while a multi-hop
+chain still waits for its bridge entity. Without ``depends_on`` every sub-question
+depends on all earlier ones (the safe, sequential order). Blocking ``LLM.chat`` calls run
+in worker threads, capped at ``max_workers`` at a time.
+
+Every LLM call of a query is charged to a per-query :class:`~dolphinmind.agent.budget.Budget`.
+With ``max_tokens`` / ``max_cost_usd`` set, a call the budget cannot afford raises
+:class:`~dolphinmind.agent.budget.BudgetExceeded`: the affected sub-questions are flagged
+``"not found"``, synthesis falls back to the best verified finding, and the result is
+marked ``stopped="budget"``.
 """
 
 from __future__ import annotations
 
+import asyncio
+import copy
 import json
 import time
 from dataclasses import dataclass, field
-from typing import List, Optional, Protocol, Sequence
+from typing import Dict, List, Optional, Protocol, Sequence, Tuple
 
+from .budget import Budget, BudgetedLLM, BudgetExceeded
 from .llm import LLM, Message
 from .react import AgentResult, ReActAgent, Step, parse_action
 from .tools import Toolbox
@@ -34,9 +48,11 @@ Break the user's question into at most {max_sub} short sub-questions, in the ord
 must be answered. Each sub-question must be answerable by looking something up in the
 document; a later sub-question may refer to the answer of an earlier one as "that person",
 "that place", etc. A question that needs a single lookup stays one sub-question.
+For each sub-question, list the indices (0-based) of the earlier sub-questions whose
+answers it needs; independent sub-questions get [] and are researched in parallel.
 
 Reply with exactly one JSON object and nothing else:
-  {{"sub_questions": ["...", "..."]}}"""
+  {{"sub_questions": ["...", "..."], "depends_on": [[], [0]]}}"""
 
 VERIFIER_PROMPT = """You check research findings against source text.
 Decide whether the excerpts directly state the given answer to the question
@@ -156,14 +172,24 @@ class Finding:
 
 @dataclass
 class MultiAgentResult:
-    """Same surface as :class:`AgentResult` (answer, citations, steps, tool_calls, stopped) plus the plan."""
+    """Same surface as :class:`AgentResult` (answer, citations, steps, tool_calls, stopped) plus
+    the plan, its dependency graph and the query's token / cost usage."""
 
     answer: str
     citations: List[int]
     plan: List[str] = field(default_factory=list)
     findings: List[Finding] = field(default_factory=list)
     steps: List[Step] = field(default_factory=list)
-    stopped: str = "answered"  # answered | not_found | synth_error
+    stopped: str = "answered"  # answered | not_found | synth_error | budget
+    depends_on: List[List[int]] = field(default_factory=list)
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cost_usd: Optional[float] = None  # set when the agent was given prices
+    tokens_estimated: bool = False  # backend reported no usage: ~4 chars/token estimate
+
+    @property
+    def total_tokens(self) -> int:
+        return self.prompt_tokens + self.completion_tokens
 
     @property
     def tool_calls(self) -> int:
@@ -173,10 +199,13 @@ class MultiAgentResult:
 # -- orchestration -------------------------------------------------------------------
 
 class MultiAgent:
-    """Planner -> workers -> verifier -> synthesis over one document.
+    """Planner -> parallel workers -> verifier -> synthesis over one document.
 
     ``llm`` drives every role unless ``planner_llm`` / ``verifier`` override it, so a
-    small model can do the research while a stronger one plans and checks.
+    small model can do the research while a stronger one plans and checks. Workers share
+    ``toolbox`` (a worker may cite chunks another worker showed, as its findings are
+    passed along). ``budget`` sets per-query limits; a fresh copy is used for every query.
+    Calls made by a custom ``verifier``'s own model are not charged to the budget.
     """
 
     def __init__(
@@ -189,33 +218,68 @@ class MultiAgent:
         max_sub_questions: int = 4,
         max_steps: int = 6,
         max_retries: int = 1,
+        max_workers: int = 4,
+        budget: Optional[Budget] = None,
     ):
         if max_sub_questions < 1:
             raise ValueError("max_sub_questions must be >= 1")
         if max_retries < 0:
             raise ValueError("max_retries must be >= 0")
+        if max_workers < 1:
+            raise ValueError("max_workers must be >= 1")
         self.llm, self.toolbox = llm, toolbox
         self.planner_llm = planner_llm or llm
-        self.verifier: Verifier = verifier if verifier is not None else LLMVerifier(llm)
+        self.verifier: Optional[Verifier] = verifier  # None -> LLMVerifier over the (metered) llm
         self.max_sub_questions, self.max_steps, self.max_retries = max_sub_questions, max_steps, max_retries
+        self.max_workers = max_workers
+        self.budget = budget or Budget()
 
     # -- stages --------------------------------------------------------------
     def plan(self, question: str) -> List[str]:
         """Sub-questions in answer order; falls back to ``[question]`` on a bad plan."""
+        return self.plan_graph(question)[0]
+
+    def plan_graph(self, question: str) -> Tuple[List[str], List[List[int]]]:
+        """``(sub_questions, depends_on)``; ``depends_on[i]`` holds earlier indices only.
+
+        A missing or malformed ``depends_on`` entry means "depends on every earlier
+        sub-question", so a sloppy plan degrades to sequential research, never to a
+        multi-hop step running before its bridge entity is known.
+        """
         messages: List[Message] = [
             {"role": "system", "content": PLANNER_PROMPT.format(max_sub=self.max_sub_questions)},
             {"role": "user", "content": f"Question: {question}"},
         ]
         try:
-            raw = parse_action(self.planner_llm.chat(messages)).get("sub_questions")
+            action = parse_action(self.planner_llm.chat(messages))
         except ValueError:
-            return [question]
+            return [question], [[]]
+        raw, raw_deps = action.get("sub_questions"), action.get("depends_on")
+        raw = raw if isinstance(raw, list) else []
+        raw_deps = raw_deps if isinstance(raw_deps, list) and len(raw_deps) == len(raw) else None
+
         subs: List[str] = []
-        for q in raw if isinstance(raw, list) else []:
+        deps: List[List[int]] = []
+        where: Dict[int, int] = {}  # raw index -> kept index (duplicates map to the first copy)
+        for j, q in enumerate(raw):
             q = " ".join(str(q).split())
-            if q and q.lower() not in {s.lower() for s in subs}:
-                subs.append(q)
-        return subs[: self.max_sub_questions] or [question]
+            if not q:
+                continue
+            dup = next((k for k, s_ in enumerate(subs) if s_.lower() == q.lower()), None)
+            if dup is not None:
+                where[j] = dup
+                continue
+            if len(subs) == self.max_sub_questions:
+                break
+            entry = raw_deps[j] if raw_deps is not None else None
+            if isinstance(entry, list) and all(str(d).lstrip("-").isdigit() for d in entry):
+                mine = sorted({where[int(d)] for d in entry if int(d) in where})
+            else:
+                mine = list(range(len(subs)))
+            where[j] = len(subs)
+            subs.append(q)
+            deps.append(mine)
+        return (subs, deps) if subs else ([question], [[]])
 
     def _worker_prompt(self, sub_q: str, original: str, known: Sequence[Finding], feedback: str) -> str:
         parts = [sub_q]
@@ -231,13 +295,14 @@ class MultiAgent:
 
     def research(self, sub_q: str, original: str, known: Sequence[Finding], steps: List[Step]) -> Finding:
         """Run a worker on one sub-question, verify it, and retry with feedback if unsupported."""
+        verifier = self.verifier if self.verifier is not None else LLMVerifier(self.llm)
         feedback, last = "", None
         for attempt in range(1, self.max_retries + 2):
             res: AgentResult = ReActAgent(self.llm, self.toolbox, max_steps=self.max_steps).run(
                 self._worker_prompt(sub_q, original, known, feedback))
             steps.extend(res.steps)
             t0 = time.time()
-            verdict = self.verifier.check(sub_q, res.answer, res.citations, self.toolbox)
+            verdict = verifier.check(sub_q, res.answer, res.citations, self.toolbox)
             steps.append(Step(f"[verifier] {sub_q} -> {res.answer!r}: "
                               f"{'supported' if verdict.supported else 'UNSUPPORTED'} ({verdict.reason})",
                               None, {}, "", time.time() - t0))
@@ -265,35 +330,96 @@ class MultiAgent:
         try:
             action = parse_action(self.llm.chat(messages))
         except ValueError:
-            best = next((f for f in reversed(findings) if f.found), None)
-            return (best.answer, best.citations, False) if best else (NOT_FOUND, [], False)
+            return (*_fallback(findings), False)
         answer = str(action.get("answer", NOT_FOUND)).strip() or NOT_FOUND
         if _is_not_found(answer):
             return answer, [], True
         cites = [c for c in dict.fromkeys(_int_ids(action.get("citations"))) if c in allowed]
         return answer, cites or list(dict.fromkeys(allowed)), True
 
-    # -- entry point ---------------------------------------------------------
+    # -- entry points --------------------------------------------------------
     def run(self, question: str) -> MultiAgentResult:
+        """Answer ``question`` (blocking). Inside a running event loop use :meth:`arun`."""
+        return asyncio.run(self.arun(question))
+
+    async def arun(self, question: str) -> MultiAgentResult:
+        """Answer ``question``, researching independent sub-questions concurrently."""
+        budget = self.budget.fresh()
+        agent = copy.copy(self)  # per-query view whose models charge this query's budget
+        agent.llm = BudgetedLLM(self.llm, budget)
+        agent.planner_llm = agent.llm if self.planner_llm is self.llm else BudgetedLLM(self.planner_llm, budget)
+        res = await agent._execute(question)
+        res.prompt_tokens, res.completion_tokens = budget.prompt_tokens, budget.completion_tokens
+        res.cost_usd, res.tokens_estimated = budget.cost_usd, budget.estimated
+        return res
+
+    async def _execute(self, question: str) -> MultiAgentResult:
         steps: List[Step] = []
         t0 = time.time()
-        plan = self.plan(question)
-        steps.append(Step(f"[planner] {len(plan)} sub-question(s)", None, {}, json.dumps(plan),
-                          time.time() - t0))
+        try:
+            plan, deps = await asyncio.to_thread(self.plan_graph, question)
+        except BudgetExceeded as e:
+            steps.append(Step(f"[budget] planner: {e}", None, {}, "", time.time() - t0))
+            return MultiAgentResult(NOT_FOUND, [], [], [], steps, stopped="budget")
+        steps.append(Step(f"[planner] {len(plan)} sub-question(s)", None, {},
+                          json.dumps({"sub_questions": plan, "depends_on": deps}), time.time() - t0))
 
-        findings: List[Finding] = []
-        for sub_q in plan:
-            findings.append(self.research(sub_q, question, findings, steps))
+        findings, budget_hit = await self._research_all(question, plan, deps, steps)
 
         if not any(f.found for f in findings):
-            return MultiAgentResult(NOT_FOUND, [], plan, findings, steps, stopped="not_found")
+            return MultiAgentResult(NOT_FOUND, [], plan, findings, steps,
+                                    stopped="budget" if budget_hit else "not_found", depends_on=deps)
         if len(findings) == 1:  # nothing to combine: the verified finding is the answer
             f = findings[0]
-            return MultiAgentResult(f.answer, list(f.citations), plan, findings, steps)
+            return MultiAgentResult(f.answer, list(f.citations), plan, findings, steps, depends_on=deps)
 
         t0 = time.time()
-        answer, cites, ok = self.synthesize(question, findings)
-        steps.append(Step("[synthesis]" if ok else "[synthesis] unparseable reply; used last finding",
-                          None, {}, answer, time.time() - t0))
-        stopped = "not_found" if _is_not_found(answer) else ("answered" if ok else "synth_error")
-        return MultiAgentResult(answer, cites, plan, findings, steps, stopped=stopped)
+        try:
+            answer, cites, ok = await asyncio.to_thread(self.synthesize, question, findings)
+            note = "[synthesis]" if ok else "[synthesis] unparseable reply; used last finding"
+        except BudgetExceeded as e:
+            (answer, cites), ok, budget_hit = _fallback(findings), False, True
+            note = f"[synthesis] budget exhausted ({e}); used last finding"
+        steps.append(Step(note, None, {}, answer, time.time() - t0))
+        if budget_hit:
+            stopped = "budget"
+        else:
+            stopped = "not_found" if _is_not_found(answer) else ("answered" if ok else "synth_error")
+        return MultiAgentResult(answer, cites, plan, findings, steps, stopped=stopped, depends_on=deps)
+
+    async def _research_all(
+        self, question: str, plan: List[str], deps: List[List[int]], steps: List[Step],
+    ) -> Tuple[List[Finding], bool]:
+        """Research every sub-question once its dependencies are done, ``max_workers`` at a time.
+
+        Trace steps are appended in plan order, whatever order the workers finish in.
+        """
+        sem = asyncio.Semaphore(self.max_workers)
+        per_step: List[List[Step]] = [[] for _ in plan]
+        tasks: List["asyncio.Task[Finding]"] = []
+        budget_hit = False
+
+        async def solve(i: int) -> Finding:
+            nonlocal budget_hit
+            known = [await tasks[d] for d in deps[i]]
+            async with sem:
+                t0 = time.time()
+                try:
+                    return await asyncio.to_thread(self.research, plan[i], question, known, per_step[i])
+                except BudgetExceeded as e:
+                    budget_hit = True
+                    per_step[i].append(Step(f"[budget] {plan[i]}: {e}", None, {}, "", time.time() - t0))
+                    return Finding(plan[i], NOT_FOUND, [], False, f"budget exhausted: {e}", 0, flagged=True)
+
+        for i in range(len(plan)):
+            tasks.append(asyncio.create_task(solve(i)))
+        findings = list(await asyncio.gather(*tasks))
+        for s_ in per_step:
+            steps.extend(s_)
+        return findings, budget_hit
+
+
+def _fallback(findings: Sequence[Finding]) -> Tuple[str, List[int]]:
+    """The last verified finding, used when synthesis fails."""
+    best = next((f for f in reversed(findings) if f.found), None)
+    return (best.answer, list(best.citations)) if best else (NOT_FOUND, [])

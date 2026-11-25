@@ -102,13 +102,29 @@ print(res.answer, res.citations)
 
 | Stage | Behaviour |
 |-------|-----------|
-| planner | ≤ `max_sub_questions` (default 4) ordered sub-questions; a bad plan falls back to the question itself |
-| workers | one `ReActAgent` per sub-question over a shared toolbox, `max_steps` tool calls each |
+| planner | ≤ `max_sub_questions` (default 4) ordered sub-questions plus `depends_on` (which earlier answers each one needs); a bad plan falls back to the question itself, a missing `depends_on` to sequential order |
+| workers | one `ReActAgent` per sub-question over a shared toolbox, `max_steps` tool calls each; run concurrently with `asyncio` (≤ `max_workers`, default 4) as soon as their dependencies are verified |
 | verifier | `LLMVerifier` (default) asks the model whether the cited chunks state the answer; `LexicalVerifier` is a model-free token check. Uncited answers fail without a model call; an unsupported finding is retried `max_retries` times (default 1) with the verifier's reason, then replaced by `"not found"` and flagged |
 | synthesis | combines findings (and does any arithmetic); may only cite chunks behind verified findings. Skipped for a single sub-question |
 
-Workers currently run one after another. `run_agent_eval.py --systems react,multi`
-compares it with the single agent.
+Independent sub-questions ("how many lamps in Varrow?" / "…in Qell?") are researched
+in parallel while a dependent step ("their sum") waits for both. `run()` blocks; inside an
+event loop (e.g. a web server) use `await agent.arun(question)`.
+
+Every LLM call of a query is metered (exact usage from API backends, otherwise ~4
+chars/token) and can be capped with a per-query budget:
+
+```python
+from dolphinmind.agent import Budget
+
+agent = MultiAgent(llm, toolbox, budget=Budget(max_tokens=20_000, max_cost_usd=0.01, prices=(0.15, 0.60)))
+res = agent.run(question)            # prices: USD per 1M input/output tokens
+print(res.total_tokens, res.cost_usd, res.stopped)   # stopped == "budget" if the cap was hit
+```
+
+A call the budget cannot afford is refused before it reaches the model; the affected
+sub-questions are flagged `"not found"` and the answer falls back to the best verified
+finding. `run_agent_eval.py --systems react,multi` compares it with the single agent.
 
 ### Command line
 
@@ -220,7 +236,7 @@ dolphinmind/
   models.py        # Qwen2.5-3B / SmolLM3-3B (YaRN) loading and generation
   evaluation.py    # needles, haystack builder, scoring, Cohen's d
   agent/           # DolphinAgent: LLM backends, tools, ReAct loop with citations,
-                   # planner/worker/verifier multi-agent, CLI
+                   # parallel planner/worker/verifier multi-agent, token/cost budgets, CLI
   eval/            # benchmark JSONL schema, synthetic question generator, metrics + bootstrap CIs,
                    # system comparison runner
 run_benchmark.py   # reproduces the results table
