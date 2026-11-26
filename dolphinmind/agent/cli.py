@@ -15,7 +15,7 @@ from typing import Any, List, Optional, TextIO
 
 from ..retrieval import SemanticRetriever
 from .llm import HFChatLLM, LLMError, OpenAICompatLLM, ScriptedLLM
-from .react import AgentResult, ReActAgent
+from .react import AgentResult, ReActAgent, Step
 from .tools import Document, Toolbox
 
 BACKENDS = ("scripted", "openai", "hf")
@@ -103,17 +103,19 @@ def format_result(result: AgentResult, doc: Document, trace: bool = False, usage
     return "\n".join(lines)
 
 
+def step_to_dict(step: Step) -> dict:
+    """JSON-ready view of one agent step (shared by ``--json`` and the HTTP service)."""
+    return {"thought": step.thought, "tool": step.tool, "args": step.args, "observation": step.observation,
+            "seconds": round(step.seconds, 4)}
+
+
 def result_to_dict(result: AgentResult, doc: Document, usage: Any = None) -> dict:
     out = {
         "answer": result.answer,
         "citations": [{"chunk_id": c, "text": doc.chunks[c]} for c in result.citations],
         "stopped": result.stopped,
         "tool_calls": result.tool_calls,
-        "steps": [
-            {"thought": s.thought, "tool": s.tool, "args": s.args, "observation": s.observation,
-             "seconds": round(s.seconds, 4)}
-            for s in result.steps
-        ],
+        "steps": [step_to_dict(s) for s in result.steps],
     }
     if usage is not None and getattr(usage, "calls", 0):
         out["usage"] = {"calls": usage.calls, "prompt_tokens": usage.prompt_tokens,

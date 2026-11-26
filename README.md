@@ -146,6 +146,32 @@ and observation, plus token usage for API backends.
 
 `--doc -` reads the document from stdin. Exit codes: 0 ok, 1 backend error, 2 bad usage.
 
+### HTTP service
+
+`python -m dolphinmind.server` serves the ReAct agent over HTTP (FastAPI + uvicorn) with the
+same `DOLPHIN_*` environment variables as the CLI; keys are never accepted over HTTP.
+
+```bash
+python -m dolphinmind.server --port 8000            # add --semantic to index uploads for search_doc
+curl -s localhost:8000/docs -H 'content-type: application/json' \
+     -d "$(jq -Rs '{text: .}' book.txt)"              # -> {"doc_id": "2cde0372ff5c1625", "n_chunks": 412, ...}
+curl -s localhost:8000/ask -H 'content-type: application/json' \
+     -d '{"doc_id": "2cde0372ff5c1625", "question": "Who killed the count?"}'
+curl -N 'localhost:8000/ask/stream?doc_id=2cde0372ff5c1625&question=Who+killed+the+count%3F'
+```
+
+| Endpoint | Behaviour |
+|----------|-----------|
+| `POST /docs` | `{text, chunk_size?, overlap?}` → `doc_id`; content-addressed, so re-uploading the same text is free. Kept in an in-memory LRU cache (`--max-docs`, default 32) |
+| `GET /docs/{id}`, `GET /docs/{id}/chunks/{i}` | chunk count / one chunk's text (for highlighting citations) |
+| `POST /ask` | `{question, doc_id \| text, max_steps?}` → answer, citations with text, steps, token usage (same shape as the CLI's `--json`) |
+| `GET /ask/stream` | Server-Sent Events: `start`, one `step` per tool call as it happens, then `answer` (or `error`) |
+| `GET /health` | liveness + cached document count |
+
+Each question gets a fresh LLM client and toolbox, so citations and token usage never
+leak between requests; backend failures return HTTP 502. In code, `create_app(llm_factory=...)`
+accepts any backend (tests use `ScriptedLLM`).
+
 ### Evaluation datasets
 
 `dolphinmind.eval` defines the benchmark format (one JSON object per line) and a
@@ -237,6 +263,7 @@ dolphinmind/
   evaluation.py    # needles, haystack builder, scoring, Cohen's d
   agent/           # DolphinAgent: LLM backends, tools, ReAct loop with citations,
                    # parallel planner/worker/verifier multi-agent, token/cost budgets, CLI
+  server/          # FastAPI service: document cache, /ask and SSE /ask/stream
   eval/            # benchmark JSONL schema, synthetic question generator, metrics + bootstrap CIs,
                    # system comparison runner
 run_benchmark.py   # reproduces the results table

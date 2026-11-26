@@ -36,7 +36,7 @@ resume bullet can carry real numbers:
 - [ ] Compare single vs multi-agent on the benchmark (accuracy vs cost)
 
 ## Phase 4: Product (week 4)
-- [ ] FastAPI backend with streaming (SSE) of agent steps
+- [x] FastAPI backend with streaming (SSE) of agent steps
 - [ ] Small Next.js UI: upload doc, ask, watch tool calls live, click citations
 - [ ] Tracing (OpenTelemetry/Langfuse), response cache, per-query cost budget
 - [ ] Deploy (Render/Fly for API, Vercel for UI) + public demo link in README
@@ -69,6 +69,6 @@ user-visible. Tick the box in the same commit that finishes it.
 - [x] 5. `run_agent_eval.py`: compare truncation, plain RAG, DolphinMind retrieval and the ReAct agent on a dataset; CSV + markdown summary table
 - [x] 6. Multi-agent: planner (decompose) → workers (research sub-questions) → verifier (check each claim against its cited chunk, retry or answer "not found")
 - [x] 7. Run workers in parallel with `asyncio` + per-query token/cost budget enforcement
-- [ ] 8. FastAPI service: `POST /ask` and `GET /ask/stream` (SSE streaming each agent step), document upload, in-memory doc cache
+- [x] 8. FastAPI service: `POST /ask` and `GET /ask/stream` (SSE streaming each agent step), document upload, in-memory doc cache
 - [ ] 9. Single-page web UI (static HTML/JS served by FastAPI): upload doc, ask, watch tool calls stream live, click citations to highlight chunks
 - [ ] 10. Tracing (OpenTelemetry spans per LLM/tool call), response caching, Dockerfile, architecture diagram in README

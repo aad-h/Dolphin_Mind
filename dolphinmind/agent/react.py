@@ -6,7 +6,7 @@ import json
 import re
 import time
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from .llm import LLM
 from .tools import Toolbox
@@ -78,7 +78,8 @@ class ReActAgent:
         self.llm, self.toolbox = llm, toolbox
         self.max_steps, self.max_parse_errors = max_steps, max_parse_errors
 
-    def run(self, question: str) -> AgentResult:
+    def run(self, question: str, on_step: Optional[Callable[[Step], None]] = None) -> AgentResult:
+        """Answer ``question``; ``on_step`` (if given) is called with each Step as soon as it finishes."""
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT.format(tools=self.toolbox.specs(), max_steps=self.max_steps)},
             {"role": "user", "content": f"Question: {question}"},
@@ -105,6 +106,8 @@ class ReActAgent:
                 # drop citations the agent never actually saw: no hallucinated sources
                 valid = [c for c in cited if c in self.toolbox.seen]
                 steps.append(Step(thought, None, {}, "", time.time() - t0))
+                if on_step is not None:
+                    on_step(steps[-1])
                 return AgentResult(str(action["answer"]).strip(), valid, steps)
 
             name, args = action.get("tool"), action.get("args") or {}
@@ -112,6 +115,8 @@ class ReActAgent:
                 args = {}
             obs = self.toolbox.call(str(name), args)
             steps.append(Step(thought, str(name), args, obs, time.time() - t0))
+            if on_step is not None:
+                on_step(steps[-1])
             messages.append({"role": "user", "content": f"Observation:\n{obs}"})
 
         # budget exhausted: force a final answer

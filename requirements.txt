@@ -13,6 +13,10 @@ faiss-cpu>=1.7.4
 # agent API backend (OpenAI-compatible endpoints)
 httpx>=0.25.0
 
+# HTTP service (python -m dolphinmind.server)
+fastapi>=0.100.0
+uvicorn>=0.23.0
+
 # evaluation & analysis
 numpy>=1.24.0
 pandas>=2.0.0
