@@ -70,5 +70,5 @@ user-visible. Tick the box in the same commit that finishes it.
 - [x] 6. Multi-agent: planner (decompose) → workers (research sub-questions) → verifier (check each claim against its cited chunk, retry or answer "not found")
 - [x] 7. Run workers in parallel with `asyncio` + per-query token/cost budget enforcement
 - [x] 8. FastAPI service: `POST /ask` and `GET /ask/stream` (SSE streaming each agent step), document upload, in-memory doc cache
-- [ ] 9. Single-page web UI (static HTML/JS served by FastAPI): upload doc, ask, watch tool calls stream live, click citations to highlight chunks
+- [x] 9. Single-page web UI (static HTML/JS served by FastAPI): upload doc, ask, watch tool calls stream live, click citations to highlight chunks
 - [ ] 10. Tracing (OpenTelemetry spans per LLM/tool call), response caching, Dockerfile, architecture diagram in README

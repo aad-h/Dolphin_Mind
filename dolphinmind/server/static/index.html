@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DolphinAgent</title>
+<style>
+  :root {
+    --bg: #f7f8fa; --panel: #ffffff; --text: #1d2330; --muted: #5d6677; --border: #dde1e8;
+    --accent: #1f6feb; --accent-soft: #e4eefd; --ok: #1a7f37; --err: #c62828; --mark: #fff3a3;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1218; --panel: #171b23; --text: #e3e7ee; --muted: #9aa3b2; --border: #2a303c;
+      --accent: #5b9dff; --accent-soft: #1b2a44; --ok: #4cc26a; --err: #ff6b6b; --mark: #5a4b00;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { padding: 16px; border-bottom: 1px solid var(--border); background: var(--panel); }
+  header h1 { margin: 0; font-size: 18px; }
+  header p { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px;
+         padding: 16px; max-width: 1280px; margin: 0 auto; }
+  @media (max-width: 860px) { main { grid-template-columns: minmax(0, 1fr); } }
+  section { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
+  section + section { margin-top: 16px; }
+  h2 { margin: 0 0 10px; font-size: 14px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  textarea, input[type=text], input[type=number] {
+    width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--bg); color: var(--text); font: inherit; }
+  textarea { min-height: 120px; resize: vertical; font-family: var(--mono); font-size: 13px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+  button { padding: 8px 14px; border: 0; border-radius: 6px; background: var(--accent); color: #fff;
+           font: inherit; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  .muted { color: var(--muted); font-size: 13px; }
+  .status { font-size: 13px; margin-top: 8px; min-height: 1.5em; }
+  .status.err { color: var(--err); }
+  .status.ok { color: var(--ok); }
+  #steps { list-style: none; margin: 0; padding: 0; }
+  #steps li { border-left: 3px solid var(--accent); padding: 6px 10px; margin-bottom: 10px; background: var(--bg);
+              border-radius: 0 6px 6px 0; }
+  .call { font-family: var(--mono); font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+  .thought { color: var(--muted); font-style: italic; font-size: 13px; }
+  .obs { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere;
+         max-height: 180px; overflow: auto; margin-top: 4px; }
+  .answer { font-size: 18px; font-weight: 600; margin: 4px 0 8px; overflow-wrap: anywhere; }
+  .chip { display: inline-block; border: 1px solid var(--accent); color: var(--accent); background: var(--accent-soft);
+          border-radius: 999px; padding: 1px 9px; margin: 2px 4px 2px 0; font-size: 12px; cursor: pointer;
+          font-family: var(--mono); }
+  .chip.active { background: var(--accent); color: #fff; }
+  #chunk { font-family: var(--mono); font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere;
+           max-height: 420px; overflow: auto; }
+  mark { background: var(--mark); color: inherit; }
+</style>
+</head>
+<body>
+<header>
+  <h1>DolphinAgent</h1>
+  <p>Upload a long document, ask a question, watch the agent's tool calls live, click citations to read the evidence.</p>
+</header>
+<main>
+  <div>
+    <section>
+      <h2>1 · Document</h2>
+      <input type="file" id="file" accept=".txt,.md,text/plain">
+      <textarea id="text" placeholder="…or paste text here" style="margin-top:8px"></textarea>
+      <div class="row">
+        <label class="muted">chunk size <input type="number" id="chunk_size" value="256" min="16" max="4096" style="width:90px"></label>
+        <label class="muted">overlap <input type="number" id="overlap" value="64" min="0" style="width:80px"></label>
+        <button id="upload">Upload</button>
+      </div>
+      <div class="status" id="doc-status"></div>
+    </section>
+    <section>
+      <h2>2 · Ask</h2>
+      <input type="text" id="question" placeholder="Who killed the count?">
+      <div class="row">
+        <label class="muted">max steps <input type="number" id="max_steps" value="6" min="1" max="20" style="width:70px"></label>
+        <button id="ask" disabled>Ask</button>
+      </div>
+      <div class="status" id="ask-status"></div>
+    </section>
+  </div>
+  <div>
+    <section>
+      <h2>Agent steps</h2>
+      <ol id="steps"></ol>
+      <p class="muted" id="steps-empty">Tool calls appear here as the agent makes them.</p>
+    </section>
+    <section id="answer-box" hidden>
+      <h2>Answer</h2>
+      <div class="answer" id="answer"></div>
+      <div id="citations"></div>
+      <div class="muted" id="meta"></div>
+    </section>
+    <section id="chunk-box" hidden>
+      <h2 id="chunk-title">Chunk</h2>
+      <div id="chunk"></div>
+    </section>
+  </div>
+</main>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const state = { docId: null, source: null, answer: "" };
+
+function setStatus(id, msg, kind) {
+  const el = $(id);
+  el.textContent = msg;
+  el.className = "status" + (kind ? " " + kind : "");
+}
+
+async function errorText(r) {
+  try {
+    const body = await r.json();
+    const d = body.detail;
+    return typeof d === "string" ? d : JSON.stringify(d);
+  } catch (_) { return r.status + " " + r.statusText; }
+}
+
+$("file").addEventListener("change", async () => {
+  const f = $("file").files[0];
+  if (f) $("text").value = await f.text();
+});
+
+$("upload").addEventListener("click", async () => {
+  const text = $("text").value;
+  if (!text.trim()) return setStatus("doc-status", "Choose a file or paste some text first.", "err");
+  $("upload").disabled = true;
+  setStatus("doc-status", "Uploading…");
+  try {
+    const r = await fetch("docs", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text, chunk_size: +$("chunk_size").value, overlap: +$("overlap").value }),
+    });
+    if (!r.ok) throw new Error(await errorText(r));
+    const info = await r.json();
+    state.docId = info.doc_id;
+    $("ask").disabled = false;
+    setStatus("doc-status", `doc ${info.doc_id}: ${info.n_chunks} chunks, ${info.chars.toLocaleString()} chars` +
+              (info.semantic ? ", semantic search on" : ", grep only"), "ok");
+  } catch (e) {
+    setStatus("doc-status", "Upload failed: " + e.message, "err");
+  } finally {
+    $("upload").disabled = false;
+  }
+});
+
+function chip(cid) {
+  const b = document.createElement("span");
+  b.className = "chip";
+  b.textContent = "chunk " + cid;
+  b.dataset.chunk = cid;
+  b.addEventListener("click", () => showChunk(cid));
+  return b;
+}
+
+// Render an observation, turning "[chunk N]" markers into clickable chips.
+function renderObservation(el, text) {
+  const re = /\[chunk (\d+)\]/g;
+  let last = 0, m;
+  while ((m = re.exec(text)) !== null) {
+    el.append(text.slice(last, m.index), chip(+m[1]));
+    last = re.lastIndex;
+  }
+  el.append(text.slice(last));
+}
+
+function addStep(step) {
+  $("steps-empty").hidden = true;
+  const li = document.createElement("li");
+  const call = document.createElement("div");
+  call.className = "call";
+  call.textContent = `${step.index}. ${step.tool}(${JSON.stringify(step.args)})  ${step.seconds.toFixed(2)}s`;
+  li.append(call);
+  if (step.thought) {
+    const t = document.createElement("div");
+    t.className = "thought";
+    t.textContent = step.thought;
+    li.append(t);
+  }
+  const obs = document.createElement("div");
+  obs.className = "obs";
+  renderObservation(obs, step.observation || "");
+  li.append(obs);
+  $("steps").append(li);
+}
+
+// Highlight every occurrence of the answer's words (3+ letters) inside the chunk text.
+function highlight(el, text, answer) {
+  const words = [...new Set((answer.match(/[\p{L}\p{N}]{3,}/gu) || []).map((w) => w.toLowerCase()))];
+  if (!words.length || answer === "not found") { el.textContent = text; return; }
+  const esc = words.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  const re = new RegExp("(" + esc.join("|") + ")", "giu");
+  el.textContent = "";
+  let first = null;
+  text.split(re).forEach((part, i) => {
+    if (i % 2) {
+      const m = document.createElement("mark");
+      m.textContent = part;
+      el.append(m);
+      first = first || m;
+    } else el.append(part);
+  });
+  if (first) first.scrollIntoView({ block: "nearest" });
+}
+
+async function showChunk(cid) {
+  if (!state.docId) return;
+  document.querySelectorAll(".chip").forEach((c) => c.classList.toggle("active", +c.dataset.chunk === cid));
+  $("chunk-box").hidden = false;
+  $("chunk-title").textContent = "Chunk " + cid;
+  $("chunk").textContent = "Loading…";
+  try {
+    const r = await fetch(`docs/${encodeURIComponent(state.docId)}/chunks/${cid}`);
+    if (!r.ok) throw new Error(await errorText(r));
+    highlight($("chunk"), (await r.json()).text, state.answer);
+  } catch (e) {
+    $("chunk").textContent = "Could not load chunk: " + e.message;
+  }
+}
+
+function showAnswer(res) {
+  state.answer = res.answer || "";
+  $("answer-box").hidden = false;
+  $("answer").textContent = res.answer;
+  const cites = $("citations");
+  cites.textContent = "";
+  if (res.citations.length) {
+    cites.append("Citations: ");
+    res.citations.forEach((c) => cites.append(chip(c.chunk_id)));
+  } else cites.textContent = "No citations.";
+  let meta = `stopped: ${res.stopped} · tool calls: ${res.tool_calls}`;
+  if (res.usage) meta += ` · tokens: ${res.usage.total_tokens}`;
+  $("meta").textContent = meta;
+  if (res.citations.length) showChunk(res.citations[0].chunk_id);
+}
+
+function finish(msg, kind) {
+  if (state.source) state.source.close();
+  state.source = null;
+  $("ask").disabled = false;
+  setStatus("ask-status", msg, kind);
+}
+
+$("ask").addEventListener("click", () => {
+  const question = $("question").value.trim();
+  if (!question || !state.docId) return;
+  if (state.source) state.source.close();
+  $("steps").textContent = "";
+  $("steps-empty").hidden = false;
+  $("answer-box").hidden = true;
+  $("chunk-box").hidden = true;
+  $("ask").disabled = true;
+  setStatus("ask-status", "Thinking…");
+  const params = new URLSearchParams({ doc_id: state.docId, question, max_steps: $("max_steps").value });
+  const t0 = performance.now();
+  const es = new EventSource("ask/stream?" + params);
+  state.source = es;
+  es.addEventListener("step", (e) => addStep(JSON.parse(e.data)));
+  es.addEventListener("answer", (e) => {
+    showAnswer(JSON.parse(e.data));
+    finish(`Done in ${((performance.now() - t0) / 1000).toFixed(1)}s.`, "ok");
+  });
+  es.addEventListener("error", (e) => {
+    // server-sent "error" events carry a detail; a bare error is a dropped connection or a 4xx
+    const detail = e.data ? JSON.parse(e.data).detail : "connection failed (unknown doc? re-upload it)";
+    finish("Error: " + detail, "err");
+  });
+});
+
+$("question").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !$("ask").disabled) $("ask").click();
+});
+</script>
+</body>
+</html>

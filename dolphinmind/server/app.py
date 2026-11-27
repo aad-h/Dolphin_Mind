@@ -1,6 +1,7 @@
 """FastAPI service for DolphinAgent: upload a document, ask questions, stream agent steps.
 
 Endpoints
+  GET  /                            single-page web UI (static HTML/JS, no build step)
   GET  /health                      liveness + number of cached documents
   POST /docs                        upload text -> ``doc_id`` (content-addressed, cached in memory)
   GET  /docs/{doc_id}               chunk count and chunking parameters
@@ -20,10 +21,11 @@ from __future__ import annotations
 import json
 import queue
 import threading
+from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 
 from ..agent.cli import result_to_dict, step_to_dict
@@ -33,6 +35,7 @@ from ..agent.tools import Toolbox
 from .store import DocStore, StoredDoc
 
 MAX_STEPS_LIMIT = 20
+STATIC_DIR = Path(__file__).parent / "static"
 
 
 class DocIn(BaseModel):
@@ -106,6 +109,11 @@ def create_app(
         out = result_to_dict(result, stored.doc, getattr(llm, "usage", None))
         out["doc_id"] = stored.doc_id
         return out
+
+    @app.get("/", response_class=HTMLResponse, include_in_schema=False)
+    def index() -> HTMLResponse:
+        """The web UI: upload, ask, live tool calls over SSE, clickable citations."""
+        return HTMLResponse((STATIC_DIR / "index.html").read_text(encoding="utf-8"))
 
     @app.get("/health")
     def health() -> dict:

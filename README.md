@@ -160,8 +160,14 @@ curl -s localhost:8000/ask -H 'content-type: application/json' \
 curl -N 'localhost:8000/ask/stream?doc_id=2cde0372ff5c1625&question=Who+killed+the+count%3F'
 ```
 
+Open <http://localhost:8000/> for the web UI: upload a `.txt` file (or paste text),
+ask a question, watch each tool call stream in as the agent makes it, and click a
+citation (or any `[chunk N]` in a tool observation) to read that chunk with the answer
+highlighted. It is one static HTML file with no build step or external assets.
+
 | Endpoint | Behaviour |
 |----------|-----------|
+| `GET /` | single-page web UI (upload, ask, live steps, clickable citations) |
 | `POST /docs` | `{text, chunk_size?, overlap?}` → `doc_id`; content-addressed, so re-uploading the same text is free. Kept in an in-memory LRU cache (`--max-docs`, default 32) |
 | `GET /docs/{id}`, `GET /docs/{id}/chunks/{i}` | chunk count / one chunk's text (for highlighting citations) |
 | `POST /ask` | `{question, doc_id \| text, max_steps?}` → answer, citations with text, steps, token usage (same shape as the CLI's `--json`) |
