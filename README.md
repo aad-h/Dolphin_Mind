@@ -172,11 +172,38 @@ highlighted. It is one static HTML file with no build step or external assets.
 | `GET /docs/{id}`, `GET /docs/{id}/chunks/{i}` | chunk count / one chunk's text (for highlighting citations) |
 | `POST /ask` | `{question, doc_id \| text, max_steps?}` → answer, citations with text, steps, token usage (same shape as the CLI's `--json`) |
 | `GET /ask/stream` | Server-Sent Events: `start`, one `step` per tool call as it happens, then `answer` (or `error`) |
-| `GET /health` | liveness + cached document count |
+| `GET /traces`, `GET /traces/{id}` | recent span trees / one trace (with `--trace`) |
+| `GET /health` | liveness, cached document count, response-cache stats |
 
 Each question gets a fresh LLM client and toolbox, so citations and token usage never
 leak between requests; backend failures return HTTP 502. In code, `create_app(llm_factory=...)`
 accepts any backend (tests use `ScriptedLLM`).
+
+**Response cache.** Answers are cached in memory (LRU, `--cache-size 256` by default,
+`--cache-size 0` to disable, `--cache-ttl SECONDS` to expire them). The key is the
+content-addressed `doc_id`, the question (case- and whitespace-insensitive) and
+`max_steps`; a hit costs no tokens, is marked `"cached": true`, and `/ask/stream` replays
+its steps. Only runs that finished with an answer are cached, never budget overruns or
+backend errors. `GET /health` reports hit/miss counts.
+
+**Tracing.** `--trace` records every question as a span tree:
+`server.ask` → `agent.run` → `llm.chat` (backend, model, prompt/completion tokens) and
+`tool.<name>` (args, newly shown chunks, errors), each with wall-clock timings.
+Responses carry a `trace_id`; `GET /traces` lists recent traces and `GET /traces/{id}`
+returns one. `--otel` additionally replays each trace into OpenTelemetry: to an OTLP
+collector (Jaeger, Langfuse, Honeycomb, ...) when `OTEL_EXPORTER_OTLP_ENDPOINT` is set,
+otherwise to the console. The same tracer works in code and covers the multi-agent
+stages (`multi.plan`, `multi.research`, `multi.verify`, `multi.synthesize`):
+
+```python
+from dolphinmind.agent import MultiAgent, Tracer, format_trace
+
+tracer = Tracer()
+MultiAgent(llm, toolbox, tracer=tracer).run("Where was the archivist born?")
+print(format_trace(tracer.traces()[0]))   # indented span tree with timings and attributes
+```
+
+On the command line, `python -m dolphinmind.agent ... --spans` prints the span tree to stderr.
 
 ### Evaluation datasets
 
@@ -268,8 +295,9 @@ dolphinmind/
   models.py        # Qwen2.5-3B / SmolLM3-3B (YaRN) loading and generation
   evaluation.py    # needles, haystack builder, scoring, Cohen's d
   agent/           # DolphinAgent: LLM backends, tools, ReAct loop with citations,
-                   # parallel planner/worker/verifier multi-agent, token/cost budgets, CLI
-  server/          # FastAPI service: document cache, /ask and SSE /ask/stream
+                   # parallel planner/worker/verifier multi-agent, token/cost budgets,
+                   # tracing (in-memory spans + OpenTelemetry export), CLI
+  server/          # FastAPI service: document + response caches, /ask, SSE /ask/stream, /traces
   eval/            # benchmark JSONL schema, synthetic question generator, metrics + bootstrap CIs,
                    # system comparison runner
 run_benchmark.py   # reproduces the results table

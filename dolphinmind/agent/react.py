@@ -10,6 +10,7 @@ from typing import Callable, List, Optional
 
 from .llm import LLM
 from .tools import Toolbox
+from .tracing import Tracer, maybe_span, traced
 
 SYSTEM_PROMPT = """You answer questions about a long document by calling tools.
 
@@ -74,12 +75,33 @@ def parse_action(text: str) -> dict:
 
 
 class ReActAgent:
-    def __init__(self, llm: LLM, toolbox: Toolbox, max_steps: int = 6, max_parse_errors: int = 2):
-        self.llm, self.toolbox = llm, toolbox
+    """Think -> tool call -> observe loop. With ``tracer`` every run, LLM call and tool call is a span."""
+
+    def __init__(self, llm: LLM, toolbox: Toolbox, max_steps: int = 6, max_parse_errors: int = 2,
+                 tracer: Optional[Tracer] = None):
+        self.tracer = tracer
+        self.llm, self.toolbox = traced(llm, tracer), toolbox
         self.max_steps, self.max_parse_errors = max_steps, max_parse_errors
 
     def run(self, question: str, on_step: Optional[Callable[[Step], None]] = None) -> AgentResult:
         """Answer ``question``; ``on_step`` (if given) is called with each Step as soon as it finishes."""
+        with maybe_span(self.tracer, "agent.run", question=question, max_steps=self.max_steps) as span:
+            result = self._run(question, on_step)
+            if span is not None:
+                span.set(answer=result.answer, citations=list(result.citations), stopped=result.stopped,
+                         tool_calls=result.tool_calls)
+            return result
+
+    def _call_tool(self, name: str, args: dict) -> str:
+        with maybe_span(self.tracer, f"tool.{name}", tool=name, args=args) as span:
+            before = set(self.toolbox.seen)
+            obs = self.toolbox.call(name, args)
+            if span is not None:
+                span.set(observation_chars=len(obs), new_chunks=sorted(self.toolbox.seen - before),
+                         tool_error=obs.startswith("error:"))
+            return obs
+
+    def _run(self, question: str, on_step: Optional[Callable[[Step], None]]) -> AgentResult:
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT.format(tools=self.toolbox.specs(), max_steps=self.max_steps)},
             {"role": "user", "content": f"Question: {question}"},
@@ -113,7 +135,7 @@ class ReActAgent:
             name, args = action.get("tool"), action.get("args") or {}
             if not isinstance(args, dict):
                 args = {}
-            obs = self.toolbox.call(str(name), args)
+            obs = self._call_tool(str(name), args)
             steps.append(Step(thought, str(name), args, obs, time.time() - t0))
             if on_step is not None:
                 on_step(steps[-1])

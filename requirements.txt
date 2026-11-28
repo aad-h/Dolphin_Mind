@@ -17,6 +17,11 @@ httpx>=0.25.0
 fastapi>=0.100.0
 uvicorn>=0.23.0
 
+# tracing export (python -m dolphinmind.server --otel); in-memory tracing needs nothing.
+# For OTLP collectors also install opentelemetry-exporter-otlp-proto-http.
+opentelemetry-api>=1.20.0
+opentelemetry-sdk>=1.20.0
+
 # evaluation & analysis
 numpy>=1.24.0
 pandas>=2.0.0

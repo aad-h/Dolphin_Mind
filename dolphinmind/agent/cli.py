@@ -17,6 +17,7 @@ from ..retrieval import SemanticRetriever
 from .llm import HFChatLLM, LLMError, OpenAICompatLLM, ScriptedLLM
 from .react import AgentResult, ReActAgent, Step
 from .tools import Document, Toolbox
+from .tracing import Tracer, format_trace
 
 BACKENDS = ("scripted", "openai", "hf")
 
@@ -38,6 +39,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--semantic", action="store_true",
                    help="enable the search_doc tool (loads a sentence-transformers model)")
     p.add_argument("--trace", action="store_true", help="print every thought, tool call and observation")
+    p.add_argument("--spans", action="store_true",
+                   help="print the timed span tree (agent run, LLM and tool calls) to stderr")
     p.add_argument("--json", action="store_true", dest="as_json", help="print the result as JSON")
     return p
 
@@ -150,8 +153,10 @@ def main(argv: Optional[List[str]] = None, stdin: TextIO = sys.stdin, stdout: Te
 
     doc = Document(text, chunk_size=args.chunk_size, overlap=args.overlap)
     retriever = SemanticRetriever() if args.semantic else None
+    tracer = Tracer(max_traces=1) if args.spans else None
     try:
-        result = ReActAgent(llm, Toolbox(doc, retriever), max_steps=args.max_steps).run(args.question)
+        result = ReActAgent(llm, Toolbox(doc, retriever), max_steps=args.max_steps,
+                            tracer=tracer).run(args.question)
     except (LLMError, RuntimeError) as e:
         print(f"error: {e}", file=stderr)
         return 1
@@ -160,6 +165,8 @@ def main(argv: Optional[List[str]] = None, stdin: TextIO = sys.stdin, stdout: Te
         if callable(close):
             close()
 
+    if tracer is not None and tracer.traces():
+        print(format_trace(tracer.traces()[0]), file=stderr)
     usage = getattr(llm, "usage", None)
     if args.as_json:
         print(json.dumps(result_to_dict(result, doc, usage), indent=2), file=stdout)

@@ -20,6 +20,11 @@ chain still waits for its bridge entity. Without ``depends_on`` every sub-questi
 depends on all earlier ones (the safe, sequential order). Blocking ``LLM.chat`` calls run
 in worker threads, capped at ``max_workers`` at a time.
 
+With a :class:`~dolphinmind.agent.tracing.Tracer`, each query is one ``multi.run`` trace
+with ``multi.plan``, ``multi.research`` (per sub-question and attempt), ``multi.verify``
+and ``multi.synthesize`` spans around the workers' ``agent.run`` / ``llm.chat`` /
+``tool.*`` spans.
+
 Every LLM call of a query is charged to a per-query :class:`~dolphinmind.agent.budget.Budget`.
 With ``max_tokens`` / ``max_cost_usd`` set, a call the budget cannot afford raises
 :class:`~dolphinmind.agent.budget.BudgetExceeded`: the affected sub-questions are flagged
@@ -40,6 +45,7 @@ from .budget import Budget, BudgetedLLM, BudgetExceeded
 from .llm import LLM, Message
 from .react import AgentResult, ReActAgent, Step, parse_action
 from .tools import Toolbox
+from .tracing import Tracer, maybe_span, traced
 
 NOT_FOUND = "not found"
 
@@ -220,6 +226,7 @@ class MultiAgent:
         max_retries: int = 1,
         max_workers: int = 4,
         budget: Optional[Budget] = None,
+        tracer: Optional[Tracer] = None,
     ):
         if max_sub_questions < 1:
             raise ValueError("max_sub_questions must be >= 1")
@@ -233,6 +240,7 @@ class MultiAgent:
         self.max_sub_questions, self.max_steps, self.max_retries = max_sub_questions, max_steps, max_retries
         self.max_workers = max_workers
         self.budget = budget or Budget()
+        self.tracer = tracer
 
     # -- stages --------------------------------------------------------------
     def plan(self, question: str) -> List[str]:
@@ -250,6 +258,13 @@ class MultiAgent:
             {"role": "system", "content": PLANNER_PROMPT.format(max_sub=self.max_sub_questions)},
             {"role": "user", "content": f"Question: {question}"},
         ]
+        with maybe_span(self.tracer, "multi.plan", question=question) as span:
+            subs, deps = self._parse_plan(question, messages)
+            if span is not None:
+                span.set(sub_questions=subs, depends_on=deps)
+            return subs, deps
+
+    def _parse_plan(self, question: str, messages: List[Message]) -> Tuple[List[str], List[List[int]]]:
         try:
             action = parse_action(self.planner_llm.chat(messages))
         except ValueError:
@@ -298,11 +313,19 @@ class MultiAgent:
         verifier = self.verifier if self.verifier is not None else LLMVerifier(self.llm)
         feedback, last = "", None
         for attempt in range(1, self.max_retries + 2):
-            res: AgentResult = ReActAgent(self.llm, self.toolbox, max_steps=self.max_steps).run(
-                self._worker_prompt(sub_q, original, known, feedback))
-            steps.extend(res.steps)
-            t0 = time.time()
-            verdict = verifier.check(sub_q, res.answer, res.citations, self.toolbox)
+            with maybe_span(self.tracer, "multi.research", sub_question=sub_q, attempt=attempt) as span:
+                res: AgentResult = ReActAgent(self.llm, self.toolbox, max_steps=self.max_steps,
+                                              tracer=self.tracer).run(
+                    self._worker_prompt(sub_q, original, known, feedback))
+                steps.extend(res.steps)
+                t0 = time.time()
+                with maybe_span(self.tracer, "multi.verify", answer=res.answer,
+                                citations=list(res.citations)) as vspan:
+                    verdict = verifier.check(sub_q, res.answer, res.citations, self.toolbox)
+                    if vspan is not None:
+                        vspan.set(supported=verdict.supported, reason=verdict.reason)
+                if span is not None:
+                    span.set(answer=res.answer, supported=verdict.supported)
             steps.append(Step(f"[verifier] {sub_q} -> {res.answer!r}: "
                               f"{'supported' if verdict.supported else 'UNSUPPORTED'} ({verdict.reason})",
                               None, {}, "", time.time() - t0))
@@ -327,10 +350,13 @@ class MultiAgent:
             {"role": "system", "content": SYNTH_PROMPT},
             {"role": "user", "content": f"Question: {question}\n\nFindings:\n" + "\n".join(lines)},
         ]
-        try:
-            action = parse_action(self.llm.chat(messages))
-        except ValueError:
-            return (*_fallback(findings), False)
+        with maybe_span(self.tracer, "multi.synthesize", findings=len(findings)) as span:
+            try:
+                action = parse_action(self.llm.chat(messages))
+            except ValueError:
+                if span is not None:
+                    span.set(parsed=False)
+                return (*_fallback(findings), False)
         answer = str(action.get("answer", NOT_FOUND)).strip() or NOT_FOUND
         if _is_not_found(answer):
             return answer, [], True
@@ -346,11 +372,18 @@ class MultiAgent:
         """Answer ``question``, researching independent sub-questions concurrently."""
         budget = self.budget.fresh()
         agent = copy.copy(self)  # per-query view whose models charge this query's budget
-        agent.llm = BudgetedLLM(self.llm, budget)
-        agent.planner_llm = agent.llm if self.planner_llm is self.llm else BudgetedLLM(self.planner_llm, budget)
-        res = await agent._execute(question)
-        res.prompt_tokens, res.completion_tokens = budget.prompt_tokens, budget.completion_tokens
-        res.cost_usd, res.tokens_estimated = budget.cost_usd, budget.estimated
+        agent.llm = traced(BudgetedLLM(self.llm, budget), self.tracer)
+        agent.planner_llm = (agent.llm if self.planner_llm is self.llm
+                             else traced(BudgetedLLM(self.planner_llm, budget), self.tracer))
+        with maybe_span(self.tracer, "multi.run", question=question) as span:
+            res = await agent._execute(question)
+            res.prompt_tokens, res.completion_tokens = budget.prompt_tokens, budget.completion_tokens
+            res.cost_usd, res.tokens_estimated = budget.cost_usd, budget.estimated
+            if span is not None:
+                span.set(answer=res.answer, citations=list(res.citations), stopped=res.stopped,
+                         sub_questions=len(res.plan), tool_calls=res.tool_calls,
+                         prompt_tokens=res.prompt_tokens, completion_tokens=res.completion_tokens,
+                         cost_usd=res.cost_usd)
         return res
 
     async def _execute(self, question: str) -> MultiAgentResult:

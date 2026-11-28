@@ -9,6 +9,14 @@ Endpoints
   POST /ask                         run the ReAct agent, return answer + citations + steps
   GET  /ask/stream                  same, as Server-Sent Events: one ``step`` event per tool
                                     call, then ``answer`` (or ``error``)
+  GET  /traces                      recent traces (span trees) when tracing is on
+  GET  /traces/{trace_id}           one trace
+
+With a :class:`~dolphinmind.server.cache.ResponseCache`, repeated questions about the same
+document (case/whitespace-insensitive, same ``max_steps``) are answered from memory with
+``"cached": true``. With a :class:`~dolphinmind.agent.tracing.Tracer`, every question is a
+``server.ask`` trace wrapping the agent's ``agent.run`` / ``llm.chat`` / ``tool.*`` spans and
+the response carries its ``trace_id``.
 
 The chat backend comes from ``llm_factory``, called once per question so that stateful
 backends (``ScriptedLLM``) and per-query token usage stay isolated. The default builds an
@@ -32,6 +40,8 @@ from ..agent.cli import result_to_dict, step_to_dict
 from ..agent.llm import LLM, LLMError, OpenAICompatLLM
 from ..agent.react import AgentResult, ReActAgent, Step
 from ..agent.tools import Toolbox
+from ..agent.tracing import Tracer, maybe_span
+from .cache import ResponseCache, response_key
 from .store import DocStore, StoredDoc
 
 MAX_STEPS_LIMIT = 20
@@ -77,12 +87,20 @@ def create_app(
     llm_factory: Callable[[], LLM] = _default_llm_factory,
     store: Optional[DocStore] = None,
     max_doc_chars: int = 5_000_000,
+    cache: Optional[ResponseCache] = None,
+    tracer: Optional[Tracer] = None,
 ) -> FastAPI:
-    """Build the service. Pass a ``ScriptedLLM`` factory (and a ``DocStore``) in tests."""
+    """Build the service. Pass a ``ScriptedLLM`` factory (and a ``DocStore``) in tests.
+
+    ``cache`` enables answer caching and ``tracer`` enables per-question traces; both are
+    off by default.
+    """
     app = FastAPI(title="DolphinAgent", version="0.1.0",
                   description="Tool-using research agent over long documents.")
     docs = store if store is not None else DocStore()
     app.state.store = docs
+    app.state.cache = cache
+    app.state.tracer = tracer
 
     def add_doc(text: str, chunk_size: int = 256, overlap: int = 64) -> StoredDoc:
         if len(text) > max_doc_chars:
@@ -96,12 +114,47 @@ def create_app(
         return stored
 
     def run_agent(stored: StoredDoc, question: str, max_steps: int,
-                  on_step: Optional[Callable[[Step], None]] = None) -> dict:
-        """Run one question with a fresh LLM and toolbox; raises LLMError/RuntimeError on backend failure."""
+                  on_step: Optional[Callable[[dict], None]] = None) -> dict:
+        """Answer one question (from the cache, or with a fresh LLM and toolbox).
+
+        ``on_step`` receives each tool step as a JSON-ready dict with its 1-based ``index``,
+        live or replayed from the cache. Raises LLMError/RuntimeError on backend failure.
+        """
+        key = response_key(stored.doc_id, question, max_steps)
+        with maybe_span(tracer, "server.ask", doc_id=stored.doc_id, question=question,
+                        max_steps=max_steps) as span:
+            hit = cache.get(key) if cache is not None else None
+            if hit is not None:
+                out = hit
+                if on_step is not None:
+                    for i, st in enumerate(out["steps"], 1):
+                        if st.get("tool"):
+                            on_step({"index": i, **st})
+            else:
+                out = _run_fresh(stored, question, max_steps, on_step)
+                if cache is not None and out["stopped"] == "answered":
+                    cache.put(key, out)
+            out["cached"] = hit is not None
+            if span is not None:
+                span.set(cached=out["cached"], answer=out["answer"], stopped=out["stopped"])
+                out["trace_id"] = span.trace_id
+        return out
+
+    def _run_fresh(stored: StoredDoc, question: str, max_steps: int,
+                   on_step: Optional[Callable[[dict], None]]) -> dict:
+        n = 0
+
+        def forward(step: Step) -> None:
+            nonlocal n
+            n += 1
+            if on_step is not None and step.tool:  # the final answer step arrives with the answer
+                on_step({"index": n, **step_to_dict(step)})
+
         llm = llm_factory()
         try:
             toolbox = Toolbox(stored.doc, stored.retriever)
-            result: AgentResult = ReActAgent(llm, toolbox, max_steps=max_steps).run(question, on_step=on_step)
+            result: AgentResult = ReActAgent(llm, toolbox, max_steps=max_steps, tracer=tracer).run(
+                question, on_step=forward)
         finally:
             close = getattr(llm, "close", None)
             if callable(close):
@@ -117,7 +170,24 @@ def create_app(
 
     @app.get("/health")
     def health() -> dict:
-        return {"status": "ok", "docs": len(docs)}
+        out: dict = {"status": "ok", "docs": len(docs)}
+        if cache is not None:
+            out["cache"] = cache.stats()
+        return out
+
+    @app.get("/traces")
+    def traces(limit: int = Query(20, ge=1, le=500)) -> dict:
+        """Most recent traces, newest first (``enabled: false`` when tracing is off)."""
+        if tracer is None:
+            return {"enabled": False, "traces": []}
+        return {"enabled": True, "traces": [t.to_dict() for t in tracer.traces(limit)]}
+
+    @app.get("/traces/{trace_id}")
+    def trace(trace_id: str) -> dict:
+        root = tracer.get(trace_id) if tracer is not None else None
+        if root is None:
+            raise HTTPException(404, f"unknown trace_id {trace_id!r}")
+        return root.to_dict()
 
     @app.post("/docs")
     def upload(body: DocIn) -> dict:
@@ -152,13 +222,8 @@ def create_app(
         events: "queue.Queue[Optional[str]]" = queue.Queue()
 
         def worker() -> None:
-            n = 0
-
-            def on_step(step: Step) -> None:
-                nonlocal n
-                n += 1
-                if step.tool:  # the final answer step arrives with the answer event
-                    events.put(_sse("step", {"index": n, **step_to_dict(step)}))
+            def on_step(step: dict) -> None:
+                events.put(_sse("step", step))
 
             try:
                 events.put(_sse("answer", run_agent(stored, question, max_steps, on_step)))
