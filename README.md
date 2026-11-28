@@ -205,6 +205,47 @@ print(format_trace(tracer.traces()[0]))   # indented span tree with timings and 
 
 On the command line, `python -m dolphinmind.agent ... --spans` prints the span tree to stderr.
 
+### Docker
+
+The image runs the HTTP service and web UI on a slim CPU-only install
+(`requirements-server.txt`: no torch or GPU), as a non-root user with a `/health` check.
+Keys are passed from the environment at run time and never baked into the image.
+
+```bash
+docker build -t dolphinagent .
+docker run -p 8000:8000 -e DOLPHIN_API_KEY -e DOLPHIN_MODEL=gpt-4o-mini dolphinagent
+# options after the image name replace the default --trace, e.g. answer caching off + OTLP export:
+docker run -p 8000:8000 -e DOLPHIN_API_KEY -e OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318 \
+           dolphinagent --otel --cache-size 0
+# semantic search_doc: CPU torch + sentence-transformers (embedder downloads on first use)
+docker build --build-arg SEMANTIC=1 -t dolphinagent:semantic . && docker run -p 8000:8000 -e DOLPHIN_API_KEY dolphinagent:semantic --trace --semantic
+```
+
+(`--otel` to a collector also needs `opentelemetry-exporter-otlp-proto-http` in the image.)
+
+### Architecture
+
+```mermaid
+graph TD
+    U[Web UI / curl / CLI] -->|POST /docs| S[(Doc store<br>content-addressed LRU:<br>chunks + optional FAISS index)]
+    U -->|POST /ask, GET /ask/stream SSE| API[FastAPI service]
+    API --> C{Response cache<br>doc_id + question + max_steps}
+    C -->|hit: no tokens| U
+    C -->|miss| A[ReAct agent<br>step budget, citation check]
+    A <-->|JSON tool calls| T[Toolbox<br>search_doc, grep,<br>read_section, calculator]
+    T --> S
+    A <-->|chat| L[LLM backend<br>OpenAI-compatible / local Qwen / scripted]
+    M[Multi-agent<br>planner → parallel workers → verifier → synthesis<br>per-query token/$ budget] --> A
+    A -. spans .-> TR[Tracer<br>server.ask → agent.run → llm.chat / tool.*]
+    TR -->|GET /traces| U
+    TR -.->|--otel| O[OpenTelemetry<br>OTLP / console]
+```
+
+A question is answered from the response cache when possible; otherwise the agent loops
+over tool calls against the cached, chunked document and may only cite chunks a tool
+actually showed it. The multi-agent reuses the same ReAct workers and toolbox. Every LLM
+and tool call is a span, so latency, tokens and tool errors are visible per question.
+
 ### Evaluation datasets
 
 `dolphinmind.eval` defines the benchmark format (one JSON object per line) and a
@@ -302,6 +343,7 @@ dolphinmind/
                    # system comparison runner
 run_benchmark.py   # reproduces the results table
 run_agent_eval.py  # truncation vs plain RAG vs DolphinMind vs ReAct agent -> CSV + summary
+Dockerfile         # CPU-only image of the HTTP service (requirements-server.txt)
 tests/             # GPU-free unit tests (pytest)
 notebooks/
   01_load_model_and_profile.ipynb

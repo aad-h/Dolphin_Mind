@@ -38,7 +38,7 @@ resume bullet can carry real numbers:
 ## Phase 4: Product (week 4)
 - [x] FastAPI backend with streaming (SSE) of agent steps
 - [ ] Small Next.js UI: upload doc, ask, watch tool calls live, click citations
-- [ ] Tracing (OpenTelemetry/Langfuse), response cache, per-query cost budget
+- [x] Tracing (OpenTelemetry/Langfuse), response cache, per-query cost budget
 - [ ] Deploy (Render/Fly for API, Vercel for UI) + public demo link in README
 
 ## Phase 5: Data science write-up (week 5)
@@ -71,4 +71,4 @@ user-visible. Tick the box in the same commit that finishes it.
 - [x] 7. Run workers in parallel with `asyncio` + per-query token/cost budget enforcement
 - [x] 8. FastAPI service: `POST /ask` and `GET /ask/stream` (SSE streaming each agent step), document upload, in-memory doc cache
 - [x] 9. Single-page web UI (static HTML/JS served by FastAPI): upload doc, ask, watch tool calls stream live, click citations to highlight chunks
-- [ ] 10. Tracing (OpenTelemetry spans per LLM/tool call), response caching, Dockerfile, architecture diagram in README
+- [x] 10. Tracing (OpenTelemetry spans per LLM/tool call), response caching, Dockerfile, architecture diagram in README
